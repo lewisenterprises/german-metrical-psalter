@@ -21,21 +21,20 @@ export interface ModelConfig {
 
 export const MODELS: ModelConfig[] = [
   { id: "claude-haiku-4-5", label: "Haiku 4.5", provider: "anthropic" },
-  { id: "claude-sonnet-4-6", label: "Sonnet 4.6", provider: "anthropic" },
-  { id: "claude-opus-4-7", label: "Opus 4.7", provider: "anthropic" },
+  { id: "claude-sonnet-5", label: "Sonnet 5", provider: "anthropic" },
+  { id: "claude-opus-4-8", label: "Opus 4.8", provider: "anthropic" },
   { id: "gpt-5.4-nano", label: "GPT-5.4 nano", provider: "openai" },
   { id: "gpt-5.4-mini", label: "GPT-5.4 mini", provider: "openai" },
   { id: "gpt-5.5", label: "GPT-5.5", provider: "openai" },
-  { id: "gemini-2.5-flash-lite", label: "2.5 Flash Lite", provider: "google" },
-  { id: "gemini-2.5-flash", label: "2.5 Flash", provider: "google" },
-  { id: "gemini-3.1-pro-preview", label: "3.1 Pro (Preview)", provider: "google" },
+  { id: "gemini-3.1-flash-lite", label: "3.1 Flash Lite", provider: "google" },
   { id: "gemini-3.5-flash", label: "3.5 Flash", provider: "google" },
-  { id: "grok-4.3", label: "Grok 4.3", provider: "xai" },
+  { id: "gemini-3.1-pro-preview", label: "3.1 Pro (Preview)", provider: "google" },
+  { id: "grok-4.5", label: "Grok 4.5", provider: "xai" },
   { id: "deepseek-v4-flash", label: "V4 Flash", provider: "deepseek" },
   { id: "deepseek-v4-pro", label: "V4 Pro", provider: "deepseek" },
   { id: "meta-llama/llama-4-maverick", label: "Llama 4 Maverick", provider: "openrouter" },
-  { id: "qwen/qwen3.6-plus", label: "Qwen 3.6 Plus", provider: "openrouter" },
-  { id: "moonshotai/kimi-k2-0905", label: "Kimi K2", provider: "openrouter" },
+  { id: "qwen/qwen3.7-plus", label: "Qwen 3.7 Plus", provider: "openrouter" },
+  { id: "moonshotai/kimi-k2.6", label: "Kimi K2.6", provider: "openrouter" },
 ];
 
 export function findModel(id: string): ModelConfig | undefined {
