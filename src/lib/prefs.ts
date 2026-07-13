@@ -15,7 +15,7 @@ export const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 // Reading-display options (settings modal). Size applies to both the Hebrew
 // source and the German output; typeface applies to the German output only.
-export type FontSize = "S" | "M" | "L";
+export type FontSize = "S" | "M" | "L" | "XL";
 export type Typeface = "serif" | "sans";
 
 export interface Prefs {
@@ -97,7 +97,10 @@ export function parsePrefs(raw: string | null | undefined): Prefs {
         : DEFAULT_PREFS.style,
     range: parseRange(o.range),
     fontSize:
-      o.fontSize === "S" || o.fontSize === "M" || o.fontSize === "L"
+      o.fontSize === "S" ||
+      o.fontSize === "M" ||
+      o.fontSize === "L" ||
+      o.fontSize === "XL"
         ? o.fontSize
         : DEFAULT_PREFS.fontSize,
     typeface:

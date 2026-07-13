@@ -81,20 +81,19 @@ const PROVIDER_ORDER: Provider[] = [
 
 const JOB_STORAGE_KEY = "psalter.activeJob";
 
-// Tailwind size classes per reading-display setting. Full literal strings so the
-// compiler keeps them (dynamically-built class names would be purged). The "M"
-// entries preserve the previous fixed sizes, so the default look is unchanged.
-const HEBREW_SIZE_CLASS: Record<FontSize, string> = {
-  S: "text-3xl",
-  M: "text-4xl",
-  L: "text-5xl",
+const FONT_SIZES: FontSize[] = ["S", "M", "L", "XL"];
+
+// The font-size setting scales the *entire* UI by driving the root <html>
+// font-size. Tailwind sizes everything (text, spacing, icons) in rem, so this
+// one lever grows every element — titles, cog, selectors, sidebar, output —
+// together. Percentages (not px) keep it relative to the reader's own browser
+// default, so it stacks with their accessibility settings. "M" = 100% is a no-op.
+const ROOT_FONT_SCALE: Record<FontSize, string> = {
+  S: "90%",
+  M: "100%",
+  L: "112.5%",
+  XL: "125%",
 };
-const OUTPUT_SIZE_CLASS: Record<FontSize, string> = {
-  S: "text-sm",
-  M: "text-base",
-  L: "text-xl",
-};
-const FONT_SIZES: FontSize[] = ["S", "M", "L"];
 
 // What a job was launched with — shown above the output and persisted with the
 // job id so a reload restores the correct labels.
@@ -120,8 +119,8 @@ export function Psalter() {
   const [model, setModel] = useState<string>(DEFAULT_PREFS.model);
   const [lang, setLang] = useState<Lang>(DEFAULT_PREFS.lang);
   const [meterId, setMeterId] = useState(DEFAULT_PREFS.meter);
-  // Reading-display settings (settings modal). Size drives both columns;
-  // typeface applies to the German output only.
+  // Reading-display settings (settings modal). Font size scales the whole UI
+  // (via the root font-size); typeface applies to the German output only.
   const [fontSize, setFontSize] = useState<FontSize>(DEFAULT_PREFS.fontSize);
   const [typeface, setTypeface] = useState<Typeface>(DEFAULT_PREFS.typeface);
   // Optional verse range within the selected psalm (null = whole psalm).
@@ -248,6 +247,15 @@ export function Psalter() {
   useEffect(() => {
     document.documentElement.lang = lang;
   }, [lang]);
+
+  // Scale the whole UI by setting the root font-size; every rem-based size
+  // (text, spacing, icons) follows. "M" = 100% leaves the browser default.
+  useEffect(() => {
+    document.documentElement.style.fontSize = ROOT_FONT_SCALE[fontSize];
+    return () => {
+      document.documentElement.style.fontSize = "";
+    };
+  }, [fontSize]);
 
   // Choosing a metre updates the default prompt (unless the user has customized
   // it — then their text is left alone and the metre still rides in the user
@@ -663,7 +671,7 @@ export function Psalter() {
         </div>
       </header>
 
-      <main className="grid grid-cols-1 lg:grid-cols-[1fr_320px_2fr] gap-6 p-6">
+      <main className="grid grid-cols-1 lg:grid-cols-[1fr_400px_2fr] gap-6 p-6">
         <section className="min-w-0">
           <h2 className="text-sm uppercase tracking-wider text-stone-500 mb-3">
             {t.hebrewHeader(psalm)}
@@ -671,7 +679,7 @@ export function Psalter() {
           <div
             dir="rtl"
             lang="he"
-            className={`font-serif ${HEBREW_SIZE_CLASS[fontSize]} leading-relaxed text-stone-800 dark:text-stone-200 whitespace-pre-wrap`}
+            className="font-serif text-4xl leading-relaxed text-stone-800 dark:text-stone-200 whitespace-pre-wrap"
             style={{ fontFamily: '"SBL Hebrew", "Ezra SIL", "Times New Roman", serif' }}
           >
             {hebrewLoading ? (
@@ -705,7 +713,7 @@ export function Psalter() {
                 <button
                   key={n}
                   onClick={() => selectPsalmFromGrid(n)}
-                  className={`text-xs py-2 sm:text-[10px] sm:py-1 rounded tabular-nums transition-colors ${
+                  className={`text-sm py-2 sm:text-xs sm:py-1 rounded tabular-nums transition-colors ${
                     n === psalm
                       ? "bg-stone-800 text-stone-50 dark:bg-stone-200 dark:text-stone-900"
                       : "text-stone-600 dark:text-stone-400 hover:bg-stone-200 dark:hover:bg-stone-700"
@@ -845,7 +853,7 @@ export function Psalter() {
                 } as React.CSSProperties
               }
             />
-            <div className="mt-1 flex justify-between text-[10px] uppercase tracking-wider text-stone-400">
+            <div className="mt-1 flex justify-between text-[0.625rem] uppercase tracking-wider text-stone-400">
               <span>{t.styleLiteral}</span>
               <span>{t.stylePoetic}</span>
             </div>
@@ -935,7 +943,7 @@ export function Psalter() {
                           return next;
                         })
                       }
-                      className="flex w-full items-center gap-1.5 text-left text-[11px] sm:text-[10px] uppercase tracking-wider text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 py-1.5 sm:py-1"
+                      className="flex w-full items-center gap-1.5 text-left text-[0.6875rem] sm:text-[0.625rem] uppercase tracking-wider text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 py-1.5 sm:py-1"
                       aria-expanded={!collapsed}
                     >
                       <span
@@ -950,7 +958,7 @@ export function Psalter() {
                         ({group.length})
                       </span>
                       {collapsed && containsSelected && (
-                        <span className="ml-auto normal-case tracking-normal text-[11px] text-stone-600 dark:text-stone-300">
+                        <span className="ml-auto normal-case tracking-normal text-[0.6875rem] text-stone-600 dark:text-stone-300">
                           {group.find((m) => m.id === model)?.label}
                         </span>
                       )}
@@ -1072,7 +1080,7 @@ export function Psalter() {
                   <summary className="cursor-pointer text-stone-500 hover:text-stone-800 dark:hover:text-stone-200">
                     {t.showRaw}
                   </summary>
-                  <pre className="mt-2 max-h-64 overflow-auto rounded bg-stone-100 dark:bg-stone-900 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all text-stone-700 dark:text-stone-300">
+                  <pre className="mt-2 max-h-64 overflow-auto rounded bg-stone-100 dark:bg-stone-900 p-3 font-mono text-[0.6875rem] leading-relaxed whitespace-pre-wrap break-all text-stone-700 dark:text-stone-300">
                     {streamingText}
                   </pre>
                 </details>
@@ -1103,7 +1111,7 @@ export function Psalter() {
               <div
                 className={`${
                   typeface === "sans" ? "font-sans" : "font-serif"
-                } ${OUTPUT_SIZE_CLASS[fontSize]} leading-relaxed space-y-3`}
+                } text-base leading-relaxed space-y-3`}
               >
                 {variant.stanzas.map((s, si) => (
                   <div key={si}>
@@ -1200,7 +1208,7 @@ export function Psalter() {
                 onChange={(e) => setPromptDraft(e.target.value)}
                 rows={18}
                 spellCheck={false}
-                className="w-full rounded border border-stone-300 dark:border-stone-700 bg-stone-50 dark:bg-stone-950 p-3 font-mono text-[11px] leading-relaxed text-stone-700 dark:text-stone-300"
+                className="w-full rounded border border-stone-300 dark:border-stone-700 bg-stone-50 dark:bg-stone-950 p-3 font-mono text-[0.6875rem] leading-relaxed text-stone-700 dark:text-stone-300"
               />
               <p className="text-xs text-stone-400">{t.promptHint}</p>
             </div>
