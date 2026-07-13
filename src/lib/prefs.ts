@@ -13,6 +13,11 @@ export const PREFS_STORAGE_KEY = "psalter.prefs";
 export const PROMPT_STORAGE_KEY = "psalter.systemPrompt";
 export const DEFAULT_MODEL = "claude-sonnet-4-6";
 
+// Reading-display options (settings modal). Size applies to both the Hebrew
+// source and the German output; typeface applies to the German output only.
+export type FontSize = "S" | "M" | "L";
+export type Typeface = "serif" | "sans";
+
 export interface Prefs {
   lang: Lang;
   model: string;
@@ -23,6 +28,8 @@ export interface Prefs {
   style: number;
   // Optional verse range within the selected psalm (null = whole psalm).
   range: { start: number; end: number } | null;
+  fontSize: FontSize;
+  typeface: Typeface;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -33,6 +40,8 @@ export const DEFAULT_PREFS: Prefs = {
   meter: DEFAULT_METER_ID,
   style: DEFAULT_STYLE,
   range: null,
+  fontSize: "M",
+  typeface: "serif",
 };
 
 function parseRange(r: unknown): Prefs["range"] {
@@ -87,5 +96,13 @@ export function parsePrefs(raw: string | null | undefined): Prefs {
         ? o.style
         : DEFAULT_PREFS.style,
     range: parseRange(o.range),
+    fontSize:
+      o.fontSize === "S" || o.fontSize === "M" || o.fontSize === "L"
+        ? o.fontSize
+        : DEFAULT_PREFS.fontSize,
+    typeface:
+      o.typeface === "serif" || o.typeface === "sans"
+        ? o.typeface
+        : DEFAULT_PREFS.typeface,
   };
 }

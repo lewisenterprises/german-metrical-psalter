@@ -9,6 +9,8 @@ import {
   PREFS_STORAGE_KEY,
   PROMPT_STORAGE_KEY,
   parsePrefs,
+  type FontSize,
+  type Typeface,
 } from "@/lib/prefs";
 
 // Parse a psalm reference into a psalm and optional verse range. Accepts
@@ -79,6 +81,21 @@ const PROVIDER_ORDER: Provider[] = [
 
 const JOB_STORAGE_KEY = "psalter.activeJob";
 
+// Tailwind size classes per reading-display setting. Full literal strings so the
+// compiler keeps them (dynamically-built class names would be purged). The "M"
+// entries preserve the previous fixed sizes, so the default look is unchanged.
+const HEBREW_SIZE_CLASS: Record<FontSize, string> = {
+  S: "text-3xl",
+  M: "text-4xl",
+  L: "text-5xl",
+};
+const OUTPUT_SIZE_CLASS: Record<FontSize, string> = {
+  S: "text-sm",
+  M: "text-base",
+  L: "text-xl",
+};
+const FONT_SIZES: FontSize[] = ["S", "M", "L"];
+
 // What a job was launched with — shown above the output and persisted with the
 // job id so a reload restores the correct labels.
 type JobRef = {
@@ -103,6 +120,10 @@ export function Psalter() {
   const [model, setModel] = useState<string>(DEFAULT_PREFS.model);
   const [lang, setLang] = useState<Lang>(DEFAULT_PREFS.lang);
   const [meterId, setMeterId] = useState(DEFAULT_PREFS.meter);
+  // Reading-display settings (settings modal). Size drives both columns;
+  // typeface applies to the German output only.
+  const [fontSize, setFontSize] = useState<FontSize>(DEFAULT_PREFS.fontSize);
+  const [typeface, setTypeface] = useState<Typeface>(DEFAULT_PREFS.typeface);
   // Optional verse range within the selected psalm (null = whole psalm).
   const [range, setRange] = useState<{ start: number; end: number } | null>(
     DEFAULT_PREFS.range
@@ -175,6 +196,8 @@ export function Psalter() {
     setLang(prefs.lang);
     setMeterId(prefs.meter);
     setRange(prefs.range);
+    setFontSize(prefs.fontSize);
+    setTypeface(prefs.typeface);
     const storedPrompt = store.getItem(PROMPT_STORAGE_KEY);
     if (storedPrompt) {
       setSystemPrompt(storedPrompt);
@@ -205,9 +228,22 @@ export function Psalter() {
         meter: meterId,
         style,
         range,
+        fontSize,
+        typeface,
       })
     );
-  }, [hydrated, lang, model, psalm, variantCount, meterId, style, range]);
+  }, [
+    hydrated,
+    lang,
+    model,
+    psalm,
+    variantCount,
+    meterId,
+    style,
+    range,
+    fontSize,
+    typeface,
+  ]);
 
   useEffect(() => {
     document.documentElement.lang = lang;
@@ -273,6 +309,8 @@ export function Psalter() {
         meter: meterId,
         style,
         range,
+        fontSize,
+        typeface,
       })
     );
     if (promptCustomized) {
@@ -633,7 +671,7 @@ export function Psalter() {
           <div
             dir="rtl"
             lang="he"
-            className="font-serif text-4xl leading-relaxed text-stone-800 dark:text-stone-200 whitespace-pre-wrap"
+            className={`font-serif ${HEBREW_SIZE_CLASS[fontSize]} leading-relaxed text-stone-800 dark:text-stone-200 whitespace-pre-wrap`}
             style={{ fontFamily: '"SBL Hebrew", "Ezra SIL", "Times New Roman", serif' }}
           >
             {hebrewLoading ? (
@@ -1062,7 +1100,11 @@ export function Psalter() {
                   {variant.notes}
                 </p>
               )}
-              <div className="font-serif text-base leading-relaxed space-y-3">
+              <div
+                className={`${
+                  typeface === "sans" ? "font-sans" : "font-serif"
+                } ${OUTPUT_SIZE_CLASS[fontSize]} leading-relaxed space-y-3`}
+              >
                 {variant.stanzas.map((s, si) => (
                   <div key={si}>
                     {s.lines.map((line, li) => (
@@ -1101,6 +1143,55 @@ export function Psalter() {
               </button>
             </header>
             <div className="p-4 space-y-3">
+              <div className="space-y-3 pb-3 border-b border-stone-200 dark:border-stone-800">
+                <span className="block text-sm font-medium">
+                  {t.displayHeader}
+                </span>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-stone-600 dark:text-stone-300">
+                    {t.fontSizeLabel}
+                  </span>
+                  <div className="inline-flex border border-stone-300 dark:border-stone-700 rounded overflow-hidden text-xs">
+                    {FONT_SIZES.map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => setFontSize(s)}
+                        className={`px-3 py-1.5 tabular-nums transition-colors ${
+                          fontSize === s
+                            ? "bg-stone-900 text-stone-50 dark:bg-stone-100 dark:text-stone-900"
+                            : "text-stone-600 hover:bg-stone-200 dark:text-stone-400 dark:hover:bg-stone-800"
+                        }`}
+                        aria-pressed={fontSize === s}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-stone-600 dark:text-stone-300">
+                    {t.typefaceLabel}
+                  </span>
+                  <div className="inline-flex border border-stone-300 dark:border-stone-700 rounded overflow-hidden text-xs">
+                    {(["serif", "sans"] as const).map((f) => (
+                      <button
+                        key={f}
+                        onClick={() => setTypeface(f)}
+                        className={`px-3 py-1.5 transition-colors ${
+                          f === "serif" ? "font-serif" : "font-sans"
+                        } ${
+                          typeface === f
+                            ? "bg-stone-900 text-stone-50 dark:bg-stone-100 dark:text-stone-900"
+                            : "text-stone-600 hover:bg-stone-200 dark:text-stone-400 dark:hover:bg-stone-800"
+                        }`}
+                        aria-pressed={typeface === f}
+                      >
+                        {f === "serif" ? t.typefaceSerif : t.typefaceSans}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
               <label className="block text-sm font-medium">
                 {t.promptHeader}
               </label>

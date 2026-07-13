@@ -51,6 +51,11 @@ export const STRINGS = {
     promptReset: "Reset to default",
     promptHint:
       "Sent to the model on every generation. Saved in your browser.",
+    displayHeader: "Display",
+    fontSizeLabel: "Font size",
+    typefaceLabel: "Typeface",
+    typefaceSerif: "Serif",
+    typefaceSans: "Sans",
     settings: "Settings",
     saveDefaults: "Save as defaults",
     saveDefaultsDone: "Saved ✓",
@@ -108,6 +113,11 @@ export const STRINGS = {
     promptReset: "Auf Standard zurücksetzen",
     promptHint:
       "Wird bei jeder Erzeugung an das Modell gesendet. Im Browser gespeichert.",
+    displayHeader: "Darstellung",
+    fontSizeLabel: "Schriftgröße",
+    typefaceLabel: "Schriftart",
+    typefaceSerif: "Serif",
+    typefaceSans: "Sans",
     settings: "Einstellungen",
     saveDefaults: "Als Standard speichern",
     saveDefaultsDone: "Gespeichert ✓",
