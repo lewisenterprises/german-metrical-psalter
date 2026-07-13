@@ -134,6 +134,10 @@ export function Psalter() {
   const [elapsed, setElapsed] = useState(0);
   const [streamingText, setStreamingText] = useState("");
   const [reasoningCount, setReasoningCount] = useState(0);
+  // True from the start of a resumed job until its first snapshot lands, so the
+  // status reads "Reconnecting…" rather than the misleading "waiting for first
+  // token" (the job is already underway; we just don't have its text yet).
+  const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // What the in-flight (or last) job was started with, so the output header
   // reflects what's actually being generated, not later edits to the controls.
@@ -369,7 +373,11 @@ export function Psalter() {
   // Follow a job to completion: live SSE tail first, falling back to polling if
   // the stream drops. The job itself runs server-side regardless, so neither
   // channel dropping loses work — and we can resume from the id at any time.
-  async function consumeJob(jobId: string, ref?: JobRef) {
+  async function consumeJob(
+    jobId: string,
+    ref?: JobRef,
+    opts?: { resume?: boolean }
+  ) {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -388,6 +396,7 @@ export function Psalter() {
     setResult(null);
     setStreamingText("");
     setReasoningCount(0);
+    setResuming(opts?.resume ?? false);
     startRef.current = Date.now();
     setElapsed(0);
     if (elapsedTimer.current) clearInterval(elapsedTimer.current);
@@ -402,6 +411,7 @@ export function Psalter() {
         window.sessionStorage.removeItem(JOB_STORAGE_KEY);
         setGenerating(false);
         setCancelling(false);
+        setResuming(false);
         if (elapsedTimer.current) {
           clearInterval(elapsedTimer.current);
           elapsedTimer.current = null;
@@ -409,6 +419,8 @@ export function Psalter() {
       }
     };
     const apply = (s: Snapshot) => {
+      // The first snapshot means we're reconnected and have the true state.
+      setResuming(false);
       if (typeof s.createdAt === "number") startRef.current = s.createdAt;
       if (typeof s.text === "string") setStreamingText(s.text);
       if (typeof s.reasoning === "number") setReasoningCount(s.reasoning);
@@ -552,7 +564,7 @@ export function Psalter() {
         id: string;
         ref: JobRef | null;
       };
-      if (id) void consumeJob(id, ref ?? undefined);
+      if (id) void consumeJob(id, ref ?? undefined, { resume: true });
     } catch {
       // Malformed entry — drop it.
       window.sessionStorage.removeItem(JOB_STORAGE_KEY);
@@ -1005,6 +1017,8 @@ export function Psalter() {
                     ? t.streamingChars(streamingText.length, elapsed)
                     : reasoningCount > 0
                     ? t.streamingThinking(reasoningCount, elapsed)
+                    : resuming
+                    ? t.streamingResuming(elapsed)
                     : t.streamingWaiting(elapsed)}
                 </p>
                 <button
