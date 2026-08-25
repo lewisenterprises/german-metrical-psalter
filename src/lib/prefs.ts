@@ -11,7 +11,10 @@ import { DEFAULT_STYLE, STYLE_MIN, STYLE_MAX } from "./prompt";
 
 export const PREFS_STORAGE_KEY = "psalter.prefs";
 export const PROMPT_STORAGE_KEY = "psalter.systemPrompt";
-export const DEFAULT_MODEL = "claude-sonnet-4-6";
+// Must be an id that exists in MODELS (src/lib/providers.ts) — a stale default
+// leaves a fresh session unable to generate at all until a model is picked by
+// hand, since the route rejects ids the registry doesn't know.
+export const DEFAULT_MODEL = "claude-sonnet-5";
 
 // Reading-display options (settings modal). Size applies to both the Hebrew
 // source and the German output; typeface applies to the German output only.
@@ -28,6 +31,10 @@ export interface Prefs {
   style: number;
   // Optional verse range within the selected psalm (null = whole psalm).
   range: { start: number; end: number } | null;
+  // Metre trial: render two complete stanzas instead of a verse range.
+  trial: boolean;
+  // Run the trial once per metre, all metres at once. Implies `trial`.
+  sweep: boolean;
   fontSize: FontSize;
   typeface: Typeface;
 }
@@ -40,6 +47,8 @@ export const DEFAULT_PREFS: Prefs = {
   meter: DEFAULT_METER_ID,
   style: DEFAULT_STYLE,
   range: null,
+  trial: false,
+  sweep: false,
   fontSize: "M",
   typeface: "serif",
 };
@@ -96,6 +105,8 @@ export function parsePrefs(raw: string | null | undefined): Prefs {
         ? o.style
         : DEFAULT_PREFS.style,
     range: parseRange(o.range),
+    trial: o.trial === true,
+    sweep: o.sweep === true,
     fontSize:
       o.fontSize === "S" ||
       o.fontSize === "M" ||

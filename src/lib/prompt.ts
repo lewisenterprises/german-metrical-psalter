@@ -13,6 +13,19 @@ export function clampStyle(n: number): number {
   return Math.min(STYLE_MAX, Math.max(STYLE_MIN, Math.round(n)));
 }
 
+// Metre-trial mode. Instead of rendering a fixed verse range, the model renders
+// exactly this many complete stanzas and stops wherever that lands. Sampling a
+// metre with a fixed four-verse range is the obvious approach, but four verses
+// rarely close on a stanza boundary — so the metre gets judged on a half-finished
+// strophe. Asking for whole stanzas instead lets the verse count fall where the
+// metre wants it.
+export const TRIAL_STANZAS = 2;
+
+// How many opening verses are handed to the model as raw material in trial mode.
+// Generous enough that even a six-line strophe can't run out of text; the prompt
+// is explicit that this is not a quota.
+export const TRIAL_CONTEXT_VERSES = 10;
+
 // Per-level guidance. `name` is shown in the # APPROACH heading; `body` sets the
 // fidelity stance, register and rhyme priority for that level.
 const STYLE_GUIDANCE: Record<number, { name: string; body: string }> = {
@@ -216,7 +229,8 @@ export function buildUserPrompt(
   verses: string[],
   variants: number,
   m: Meter,
-  startVerse = 1
+  startVerse = 1,
+  trial = false
 ): string {
   const numbered = verses
     .map((v, i) => `${startVerse + i}. ${v}`)
@@ -226,13 +240,48 @@ export function buildUserPrompt(
     verses.length === 1
       ? `verse ${startVerse}`
       : `verses ${startVerse}–${endVerse}`;
+  const hebrewBlock = `HEBREW (Miqra according to the Masorah — full niqqud and ta'amim preserved):
+
+${numbered}`;
+
+  if (trial)
+    return buildTrialUserPrompt(psalm, hebrewBlock, variants, m, startVerse);
+
   return `Render Psalm ${psalm} (${range}) as ${variants} distinct version${variants === 1 ? "" : "s"} in German ${m.label}.
 
-HEBREW (Miqra according to the Masorah — full niqqud and ta'amim preserved):
-
-${numbered}
+${hebrewBlock}
 
 Produce exactly ${variants} variant${variants === 1 ? "" : "s"}. Each variant must cover all ${verses.length} verse${verses.length === 1 ? "" : "s"} shown (omitting only the superscription if present). Return only the JSON.`;
+}
+
+// The trial prompt deliberately contradicts the system prompt's "cover the whole
+// passage" rule, so it says so in as many words. Left implicit, the model splits
+// the difference and crams ten verses into two stanzas — precisely the distortion
+// a trial is meant to avoid, and one that would make a perfectly good metre look
+// unusable.
+function buildTrialUserPrompt(
+  psalm: number,
+  hebrewBlock: string,
+  variants: number,
+  m: Meter,
+  startVerse: number
+): string {
+  return `Render the OPENING of Psalm ${psalm} in German ${m.label}, as ${variants} distinct version${variants === 1 ? "" : "s"}. This is a metre trial: I am listening to how this metre carries this psalm. I am not asking for the whole psalm.
+
+${hebrewBlock}
+
+# METRE TRIAL — stop after ${TRIAL_STANZAS} complete stanzas
+
+**This section overrides the "cover the whole passage" rule in your instructions.** Here you must NOT cover the passage above.
+
+- Produce exactly ${TRIAL_STANZAS} stanzas of ${m.pattern.length} lines each — no more, no fewer — in every variant.
+- Begin at verse ${startVerse}, at its first true content clause (still omitting the superscription if one is present).
+- Carry the Hebrew forward only as far as those ${TRIAL_STANZAS} stanzas naturally reach, then stop. Stop on a verse or clause boundary: do not open a sentence or an image you have no room to finish.
+- **The verses above are raw material, not a quota.** You are not expected to use them all, and you must not compress, summarise, or skip ahead in order to fit more in. How far you get is itself the answer I am looking for — a dense psalm may fill both stanzas with a verse and a half, an airy one may reach verse five. Either is a good result.
+- Keep exactly the fidelity, register and rhyme discipline you would use for a full rendering. A trial is only useful if it sounds like the real thing.
+- In \`notes\`, state which verses the ${TRIAL_STANZAS} stanzas cover — e.g. "vv. 1–3" — and nothing else.
+
+Produce exactly ${variants} variant${variants === 1 ? "" : "s"}. Return only the JSON.`;
 }
 
 export const OUTPUT_SCHEMA = {

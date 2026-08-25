@@ -1,10 +1,16 @@
 import { NextRequest } from "next/server";
 import { tasks } from "@trigger.dev/sdk/v3";
 import { getPsalm } from "@/lib/psalms";
-import { buildSystemPrompt, buildUserPrompt, clampStyle } from "@/lib/prompt";
+import {
+  buildSystemPrompt,
+  buildUserPrompt,
+  clampStyle,
+  TRIAL_CONTEXT_VERSES,
+} from "@/lib/prompt";
 import { findMeter } from "@/lib/meters";
 import { findModel, MODELS, discoverLMStudioModels } from "@/lib/providers";
 import { getRedis } from "@/lib/redis";
+import { DEFAULT_MODEL } from "@/lib/prefs";
 import { writeJob, setRunId } from "@/lib/jobs";
 import type { generatePsalm } from "@/trigger/generate";
 
@@ -29,6 +35,7 @@ export async function POST(req: NextRequest) {
     style?: number;
     verseStart?: number;
     verseEnd?: number;
+    trial?: boolean;
   };
   try {
     body = await req.json();
@@ -45,8 +52,12 @@ export async function POST(req: NextRequest) {
 
   const psalm = Number(body.psalm);
   const variants = Number(body.variants ?? 3);
-  const modelId = body.model ?? "claude-sonnet-4-6";
+  const modelId = body.model ?? DEFAULT_MODEL;
   const meter = findMeter(body.meter);
+  // Metre trial: render two complete stanzas rather than a verse range, so the
+  // metre is never judged on a half-finished stanza. It replaces the range's end
+  // with a fixed window of raw material (the start is still honoured).
+  const trial = body.trial === true;
   // The literal↔poetic dial. The client bakes it into the system prompt it
   // sends, so here it's mainly for logging and for the (rare) fallback when no
   // system prompt is supplied.
@@ -87,12 +98,18 @@ export async function POST(req: NextRequest) {
     (body.verseStart as number) <= hebrew.length
       ? (body.verseStart as number)
       : 1;
-  const endVerse =
+  const requestedEnd =
     Number.isInteger(body.verseEnd) &&
     (body.verseEnd as number) >= startVerse &&
     (body.verseEnd as number) <= hebrew.length
       ? (body.verseEnd as number)
       : hebrew.length;
+  // In trial mode the model decides where to stop, so any requested end is
+  // replaced by a fixed window of opening verses — enough raw material that even
+  // a six-line strophe can't run out of text before its two stanzas are full.
+  const endVerse = trial
+    ? Math.min(hebrew.length, startVerse + TRIAL_CONTEXT_VERSES - 1)
+    : requestedEnd;
   const verses = hebrew.slice(startVerse - 1, endVerse);
 
   const id = crypto.randomUUID();
@@ -124,6 +141,7 @@ export async function POST(req: NextRequest) {
       variants,
       meter: meter.id,
       style,
+      trial,
       model: model.id,
       provider: model.provider,
       ip,
@@ -150,7 +168,14 @@ export async function POST(req: NextRequest) {
       id,
       model,
       systemPrompt,
-      userPrompt: buildUserPrompt(psalm, verses, variants, meter, startVerse),
+      userPrompt: buildUserPrompt(
+        psalm,
+        verses,
+        variants,
+        meter,
+        startVerse,
+        trial
+      ),
       createdAt,
     });
     // Remember the Trigger run id so cancel can stop the run on its infra.

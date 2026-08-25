@@ -107,7 +107,23 @@ type JobRef = {
   modelLabel: string;
   provider?: Provider;
   variants: number;
+  // Metre trial (two stanzas rather than a verse range), so the output header
+  // says so rather than showing a verse range the job never used.
+  trial?: boolean;
 };
+
+// One metre's slot in a sweep. A sweep runs every metre as its own job, all in
+// flight at once, so each carries its own status and result — none of them owns
+// the single-job streaming state that a normal generation uses.
+type SweepRun = {
+  meterId: string;
+  jobId?: string;
+  status: "queued" | "running" | "done" | "error" | "cancelled";
+  result?: GenerateResponse;
+  error?: string;
+};
+
+const SWEEP_TERMINAL: SweepRun["status"][] = ["done", "error", "cancelled"];
 
 export function Psalter() {
   // All settings are session-scoped. The server can't read sessionStorage, so
@@ -127,6 +143,11 @@ export function Psalter() {
   const [range, setRange] = useState<{ start: number; end: number } | null>(
     DEFAULT_PREFS.range
   );
+  // Metre trial: two complete stanzas instead of a verse range. `sweep` runs
+  // that trial across every metre at once, and implies `trial`.
+  const [trial, setTrial] = useState(DEFAULT_PREFS.trial);
+  const [sweep, setSweep] = useState(DEFAULT_PREFS.sweep);
+  const [sweepRuns, setSweepRuns] = useState<SweepRun[]>([]);
   const [refInput, setRefInput] = useState("");
   const [refError, setRefError] = useState(false);
   const [meterOpen, setMeterOpen] = useState(false);
@@ -140,6 +161,12 @@ export function Psalter() {
   const [hasDefaults, setHasDefaults] = useState(false);
   const [defaultsSaved, setDefaultsSaved] = useState(false);
   const meter = findMeter(meterId);
+  // A sweep replaces the single-job output with one card per metre, so the
+  // streaming view, the empty state and the variants list all defer to it.
+  const sweeping = sweepRuns.length > 0;
+  const sweepDone = sweepRuns.filter((r) =>
+    SWEEP_TERMINAL.includes(r.status)
+  ).length;
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [collapsedProviders, setCollapsedProviders] = useState<Set<Provider>>(
     () => new Set(PROVIDER_ORDER)
@@ -174,6 +201,8 @@ export function Psalter() {
   const elapsedTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const activeJobRef = useRef<string | null>(null);
+  // Job ids of the metres currently in a sweep, so Cancel can stop all of them.
+  const sweepJobsRef = useRef<string[]>([]);
   const startRef = useRef<number>(0);
   const t = STRINGS[lang];
 
@@ -195,6 +224,8 @@ export function Psalter() {
     setLang(prefs.lang);
     setMeterId(prefs.meter);
     setRange(prefs.range);
+    setTrial(prefs.trial || prefs.sweep);
+    setSweep(prefs.sweep);
     setFontSize(prefs.fontSize);
     setTypeface(prefs.typeface);
     const storedPrompt = store.getItem(PROMPT_STORAGE_KEY);
@@ -227,6 +258,8 @@ export function Psalter() {
         meter: meterId,
         style,
         range,
+        trial,
+        sweep,
         fontSize,
         typeface,
       })
@@ -240,6 +273,8 @@ export function Psalter() {
     meterId,
     style,
     range,
+    trial,
+    sweep,
     fontSize,
     typeface,
   ]);
@@ -317,6 +352,8 @@ export function Psalter() {
         meter: meterId,
         style,
         range,
+        trial,
+        sweep,
         fontSize,
         typeface,
       })
@@ -540,20 +577,60 @@ export function Psalter() {
     }
   }
 
-  async function cancel() {
-    const id = activeJobRef.current;
-    if (!id || cancelling) return;
-    setCancelling(true);
-    try {
-      await fetch(`/api/job/${id}/cancel`, { method: "POST" });
-    } catch {
-      // The worker may still see the flag on its next tick; ignore network blips.
+  function patchRun(meterId: string, patch: Partial<SweepRun>) {
+    setSweepRuns((prev) =>
+      prev.map((r) => (r.meterId === meterId ? { ...r, ...patch } : r))
+    );
+  }
+
+  // Poll one job to a terminal state and hand back its final snapshot. The
+  // sweep uses this rather than consumeJob: a dozen jobs are in flight at once,
+  // and consumeJob owns the single-job streaming state (and aborts its
+  // predecessor on entry), so only one of them could use it. Returns null if the
+  // sweep was aborted or the job disappeared.
+  async function followJob(
+    jobId: string,
+    signal: AbortSignal
+  ): Promise<Snapshot | null> {
+    while (!signal.aborted) {
+      try {
+        const res = await fetch(`/api/job/${jobId}`, { signal });
+        if (res.status === 404) return null;
+        const job: Snapshot = await res.json();
+        if (job.status && job.status !== "running") return job;
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return null;
+        // Transient network error — keep polling.
+      }
+      await new Promise((r) => setTimeout(r, 2000));
     }
+    return null;
+  }
+
+  async function cancel() {
+    if (cancelling) return;
+    setCancelling(true);
+    const ids = sweepJobsRef.current.length
+      ? sweepJobsRef.current.slice()
+      : activeJobRef.current
+      ? [activeJobRef.current]
+      : [];
+    await Promise.all(
+      ids.map((id) =>
+        // The worker may still see the flag on its next tick; ignore network blips.
+        fetch(`/api/job/${id}/cancel`, { method: "POST" }).catch(() => {})
+      )
+    );
     // Stay in the cancelling state until the stream/poll observes the terminal
-    // status and stop() clears it.
+    // status and stop() clears it. If Cancel was pressed before any job id came
+    // back there is nothing to cancel server-side, so drop the in-flight POSTs.
+    if (!ids.length) abortRef.current?.abort();
   }
 
   async function generate() {
+    if (sweep) return generateSweep();
+    setSweepRuns([]);
+    sweepJobsRef.current = [];
     const selected = models.find((m) => m.id === model);
     const ref: JobRef = {
       psalm,
@@ -563,6 +640,7 @@ export function Psalter() {
       modelLabel: selected?.label ?? model,
       provider: selected?.provider,
       variants: variantCount,
+      trial,
     };
     setGenerating(true);
     setError(null);
@@ -586,6 +664,7 @@ export function Psalter() {
           style,
           verseStart: range?.start,
           verseEnd: range?.end,
+          trial,
         }),
       });
       const data = await r.json();
@@ -598,6 +677,124 @@ export function Psalter() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setGenerating(false);
+    }
+  }
+
+  // Trial every metre at once: one job per metre, all fired together, each
+  // followed independently. Deliberately one variant per metre — the question a
+  // sweep answers is which metre suits the psalm, not which wording is best, and
+  // one strong sample per metre is easier to compare than a dozen triples.
+  //
+  // No system prompt is sent, so the server builds the right per-metre default
+  // for each job. A customized prompt is written against one metre (its # METRE
+  // section names that metre's pattern outright) and cannot be retargeted, so
+  // sending it would silently render all twelve in the same metre.
+  async function generateSweep() {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    // A sweep isn't resumable across reloads — there are twelve ids, not one —
+    // so release the single-job slot rather than leaving a stale id behind.
+    activeJobRef.current = null;
+    window.sessionStorage.removeItem(JOB_STORAGE_KEY);
+    sweepJobsRef.current = [];
+
+    const selected = models.find((m) => m.id === model);
+    setSubmitted({
+      psalm,
+      range,
+      meterId,
+      model,
+      modelLabel: selected?.label ?? model,
+      provider: selected?.provider,
+      variants: 1,
+      trial: true,
+    });
+    setResult(null);
+    setStreamingText("");
+    setReasoningCount(0);
+    setError(null);
+    setResuming(false);
+    setGenerating(true);
+    setCancelling(false);
+    setSweepRuns(METERS.map((m) => ({ meterId: m.id, status: "queued" })));
+    startRef.current = Date.now();
+    setElapsed(0);
+    if (elapsedTimer.current) clearInterval(elapsedTimer.current);
+    elapsedTimer.current = setInterval(
+      () => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)),
+      250
+    );
+
+    await Promise.all(
+      METERS.map(async (m) => {
+        try {
+          const r = await fetch("/api/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: JSON.stringify({
+              psalm,
+              variants: 1,
+              model,
+              meter: m.id,
+              style,
+              // Only the start matters in trial mode; the model decides where to
+              // stop, so any end of the range is ignored server-side.
+              verseStart: range?.start,
+              trial: true,
+            }),
+          });
+          const data = await r.json();
+          if (!r.ok || !data.jobId) {
+            patchRun(m.id, {
+              status: "error",
+              error: data.error ?? `HTTP ${r.status}`,
+            });
+            return;
+          }
+          sweepJobsRef.current.push(data.jobId);
+          patchRun(m.id, { status: "running", jobId: data.jobId });
+
+          const snap = await followJob(data.jobId, controller.signal);
+          if (!snap) return; // aborted, or the job vanished from the store
+          if (snap.status === "done") {
+            patchRun(m.id, {
+              status: "done",
+              result: (snap.result ?? null) as GenerateResponse,
+            });
+          } else if (snap.status === "error") {
+            patchRun(m.id, {
+              status: "error",
+              error: snap.error || "unknown error",
+            });
+          } else {
+            patchRun(m.id, { status: "cancelled" });
+          }
+        } catch (e) {
+          if (e instanceof DOMException && e.name === "AbortError") return;
+          patchRun(m.id, {
+            status: "error",
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      })
+    );
+
+    // Anything still un-terminal here was aborted rather than finished.
+    setSweepRuns((prev) =>
+      prev.map((r) =>
+        SWEEP_TERMINAL.includes(r.status)
+          ? r
+          : { ...r, status: "cancelled" as const }
+      )
+    );
+    sweepJobsRef.current = [];
+    setGenerating(false);
+    setCancelling(false);
+    if (elapsedTimer.current) {
+      clearInterval(elapsedTimer.current);
+      elapsedTimer.current = null;
     }
   }
 
@@ -797,7 +994,7 @@ export function Psalter() {
               onClick={generate}
               className="w-full py-2.5 sm:py-2 rounded bg-stone-200 text-stone-900 hover:bg-stone-900 hover:text-stone-50 dark:bg-stone-700 dark:text-stone-50 dark:hover:bg-stone-300 dark:hover:text-stone-900 transition-colors"
             >
-              {t.generate}
+              {sweep ? t.sweepGenerate(METERS.length) : t.generate}
             </button>
           )}
           {generating && (
@@ -817,20 +1014,23 @@ export function Psalter() {
               )}
             </p>
           )}
-          <div>
+          {/* A sweep is fixed at one version per metre, so the slider shows 1
+              and is inert rather than promising a count it won't honour. */}
+          <div className={sweep ? "opacity-50" : ""}>
             <label className="block text-sm mb-1">
-              {t.variantsLabel(variantCount)}
+              {t.variantsLabel(sweep ? 1 : variantCount)}
             </label>
             <input
               type="range"
               min={1}
               max={5}
-              value={variantCount}
+              value={sweep ? 1 : variantCount}
+              disabled={sweep}
               onChange={(e) => setVariantCount(Number(e.target.value))}
               className="variants-slider w-full"
               style={
                 {
-                  "--p": `${((variantCount - 1) / 4) * 100}%`,
+                  "--p": `${(((sweep ? 1 : variantCount) - 1) / 4) * 100}%`,
                 } as React.CSSProperties
               }
             />
@@ -874,20 +1074,25 @@ export function Psalter() {
               <span>{t.meterLabel}</span>
               {!meterOpen && (
                 <span className="ml-auto tabular-nums text-xs text-stone-500 dark:text-stone-300">
-                  {meter.short}
+                  {sweep ? t.sweepAllMetres(METERS.length) : meter.short}
                 </span>
               )}
             </button>
             {meterOpen && (
-              <div className="flex flex-wrap gap-1 mt-2">
+              <div
+                className={`flex flex-wrap gap-1 mt-2 ${
+                  sweep ? "opacity-40" : ""
+                }`}
+              >
                 {METERS.map((m) => {
-                  const selected = m.id === meterId;
+                  const selected = !sweep && m.id === meterId;
                   return (
                     <button
                       key={m.id}
                       onClick={() => selectMeter(m.id)}
+                      disabled={sweep}
                       title={m.label}
-                      className={`text-sm px-3 py-1.5 sm:text-xs sm:px-2.5 sm:py-1 rounded-full border tabular-nums transition-colors ${
+                      className={`text-sm px-3 py-1.5 sm:text-xs sm:px-2.5 sm:py-1 rounded-full border tabular-nums transition-colors disabled:cursor-default ${
                         selected
                           ? "bg-stone-900 text-stone-50 border-stone-900 dark:bg-stone-100 dark:text-stone-900 dark:border-stone-100"
                           : "border-stone-300 text-stone-700 hover:border-stone-900 hover:text-stone-900 dark:border-stone-700 dark:text-stone-300 dark:hover:border-stone-100 dark:hover:text-stone-100"
@@ -899,6 +1104,49 @@ export function Psalter() {
                 })}
               </div>
             )}
+            <div className="mt-2 space-y-2">
+              <label className="flex items-start gap-2 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={trial}
+                  // A sweep is a trial run twelve times over; un-ticking the
+                  // trial has to release the sweep with it, or Generate would
+                  // claim to render whole psalms in every metre.
+                  onChange={(e) => {
+                    setTrial(e.target.checked);
+                    if (!e.target.checked) setSweep(false);
+                  }}
+                  className="mt-0.5 shrink-0 accent-stone-800 dark:accent-stone-300"
+                />
+                <span>
+                  <span className="text-stone-700 dark:text-stone-200">
+                    {t.trialLabel}
+                  </span>
+                  <span className="block text-stone-400">{t.trialHint}</span>
+                </span>
+              </label>
+              <label
+                className={`flex items-start gap-2 text-xs cursor-pointer ${
+                  trial ? "" : "opacity-50"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={sweep}
+                  onChange={(e) => {
+                    setSweep(e.target.checked);
+                    if (e.target.checked) setTrial(true);
+                  }}
+                  className="mt-0.5 shrink-0 accent-stone-800 dark:accent-stone-300"
+                />
+                <span>
+                  <span className="text-stone-700 dark:text-stone-200">
+                    {t.sweepLabel}
+                  </span>
+                  <span className="block text-stone-400">{t.sweepHint}</span>
+                </span>
+              </label>
+            </div>
           </div>
           <div>
             <button
@@ -1022,7 +1270,7 @@ export function Psalter() {
             <h2 className="text-sm uppercase tracking-wider text-stone-500">
               {t.outputHeader}
             </h2>
-            {(generating || result) &&
+            {(generating || result || sweeping) &&
               (() => {
                 const live = models.find((x) => x.id === model);
                 const ref: JobRef = submitted ?? {
@@ -1033,15 +1281,28 @@ export function Psalter() {
                   modelLabel: live?.label ?? model,
                   provider: live?.provider,
                   variants: variantCount,
+                  trial,
                 };
+                // A trial ignores the range's end (the model chooses where to
+                // stop), so show only where it starts rather than a span it
+                // never rendered.
+                const where = ref.range
+                  ? ref.trial
+                    ? `:${ref.range.start}–`
+                    : `:${ref.range.start}–${ref.range.end}`
+                  : "";
                 return (
                   <div className="space-y-0.5">
                     <p className="font-serif text-lg tabular-nums text-stone-700 dark:text-stone-300">
                       Psalm {ref.psalm}
-                      {ref.range ? `:${ref.range.start}–${ref.range.end}` : ""}
+                      {where}
                     </p>
                     <p className="text-xs text-stone-400">
-                      {findMeter(ref.meterId).short} · {t.variantsCount(ref.variants)} ·{" "}
+                      {sweeping
+                        ? t.sweepAllMetres(sweepRuns.length)
+                        : findMeter(ref.meterId).short}{" "}
+                      ·{" "}
+                      {ref.trial ? t.trialBadge : t.variantsCount(ref.variants)} ·{" "}
                       {ref.provider ? `${PROVIDER_LABEL[ref.provider]} · ` : ""}
                       {ref.modelLabel}
                     </p>
@@ -1049,7 +1310,7 @@ export function Psalter() {
                 );
               })()}
           </div>
-          {!result && !generating && (
+          {!result && !generating && !sweeping && (
             <p className="text-stone-400 italic">
               {t.pressGenerate(psalm, variantCount)}
             </p>
@@ -1059,7 +1320,9 @@ export function Psalter() {
               <div className="flex items-center gap-3">
                 <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-stone-300 border-t-stone-600 dark:border-stone-700 dark:border-t-stone-300" />
                 <p className="text-stone-400 italic">
-                  {streamingText.length > 0
+                  {sweeping
+                    ? t.sweepProgress(sweepDone, sweepRuns.length, elapsed)
+                    : streamingText.length > 0
                     ? t.streamingChars(streamingText.length, elapsed)
                     : reasoningCount > 0
                     ? t.streamingThinking(reasoningCount, elapsed)
@@ -1075,7 +1338,7 @@ export function Psalter() {
                   {cancelling ? t.cancelling : t.cancel}
                 </button>
               </div>
-              {streamingText.length > 0 && (
+              {!sweeping && streamingText.length > 0 && (
                 <details className="text-xs">
                   <summary className="cursor-pointer text-stone-500 hover:text-stone-800 dark:hover:text-stone-200">
                     {t.showRaw}
@@ -1087,6 +1350,75 @@ export function Psalter() {
               )}
             </div>
           )}
+          {sweeping &&
+            sweepRuns.map((run) => {
+              const m = findMeter(run.meterId);
+              const variant = run.result?.variants?.[0];
+              return (
+                <article
+                  key={run.meterId}
+                  className="border border-stone-200 dark:border-stone-800 rounded-lg p-4 bg-white dark:bg-stone-900"
+                >
+                  <header className="flex items-baseline gap-3 mb-3">
+                    <h3 className="font-serif text-lg tabular-nums shrink-0">
+                      {m.short}
+                    </h3>
+                    <span className="min-w-0 truncate text-xs text-stone-400">
+                      {m.label}
+                    </span>
+                    {variant ? (
+                      <button
+                        onClick={() =>
+                          navigator.clipboard.writeText(
+                            stanzasToText(variant.stanzas)
+                          )
+                        }
+                        className="ml-auto shrink-0 text-xs text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
+                      >
+                        {t.copy}
+                      </button>
+                    ) : (
+                      <span className="ml-auto shrink-0 text-xs text-stone-400 italic">
+                        {run.status === "queued"
+                          ? t.sweepQueued
+                          : run.status === "running"
+                          ? t.sweepRunning
+                          : run.status === "cancelled"
+                          ? t.sweepCancelled
+                          : ""}
+                      </span>
+                    )}
+                  </header>
+                  {run.status === "error" && (
+                    <p className="text-xs text-red-600 dark:text-red-400">
+                      {run.error}
+                    </p>
+                  )}
+                  {variant?.notes && (
+                    <p className="text-xs text-stone-500 italic mb-3">
+                      {variant.notes}
+                    </p>
+                  )}
+                  {variant && (
+                    <div
+                      className={`${
+                        typeface === "sans" ? "font-sans" : "font-serif"
+                      } text-base leading-relaxed space-y-3`}
+                    >
+                      {variant.stanzas.map((s, si) => (
+                        <div key={si}>
+                          {s.lines.map((line, li) => (
+                            <p key={li} className={li % 2 === 1 ? "pl-6" : ""}>
+                              {line}
+                            </p>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              );
+            })}
           {result?.variants?.map((variant, vi) => (
             <article
               key={vi}

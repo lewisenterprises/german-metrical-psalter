@@ -19,6 +19,20 @@ export const STRINGS = {
     stylePoetic: "poetic",
     styleNames: ["Strictly literal", "Faithful", "Balanced", "Poetic", "Free paraphrase"],
     meterLabel: "Metre",
+    trialLabel: "Metre trial — two stanzas only",
+    trialHint:
+      "Renders exactly two complete stanzas instead of a verse range, so a metre is never judged on a half-finished stanza. How far it gets is up to the psalm.",
+    trialBadge: "trial · 2 stanzas",
+    sweepLabel: "…in every metre at once",
+    sweepHint:
+      "Runs the trial once per metre, one version each, so you can compare them without generating them one at a time.",
+    sweepGenerate: (n: number) => `Trial all ${n} metres`,
+    sweepAllMetres: (n: number) => `all ${n} metres`,
+    sweepProgress: (done: number, total: number, s: number) =>
+      `${done} of ${total} metres done · ${s}s`,
+    sweepQueued: "queued",
+    sweepRunning: "generating…",
+    sweepCancelled: "cancelled",
     modelLabel: "Model",
     missingKey: (provider: string) => `Missing API key for ${provider}`,
     generate: "Generate",
@@ -81,6 +95,20 @@ export const STRINGS = {
     stylePoetic: "poetisch",
     styleNames: ["Streng wörtlich", "Texttreu", "Ausgewogen", "Poetisch", "Freie Nachdichtung"],
     meterLabel: "Versmaß",
+    trialLabel: "Versmaß-Probe — nur zwei Strophen",
+    trialHint:
+      "Setzt genau zwei vollständige Strophen statt eines Versbereichs, damit ein Versmaß nie an einer halben Strophe gemessen wird. Wie weit der Text dabei kommt, bestimmt der Psalm.",
+    trialBadge: "Probe · 2 Strophen",
+    sweepLabel: "…in jedem Versmaß zugleich",
+    sweepHint:
+      "Führt die Probe einmal pro Versmaß aus, je eine Fassung, damit du sie vergleichen kannst, ohne sie einzeln zu erzeugen.",
+    sweepGenerate: (n: number) => `Alle ${n} Versmaße proben`,
+    sweepAllMetres: (n: number) => `alle ${n} Versmaße`,
+    sweepProgress: (done: number, total: number, s: number) =>
+      `${done} von ${total} Versmaßen fertig · ${s}s`,
+    sweepQueued: "in Warteschlange",
+    sweepRunning: "wird erzeugt…",
+    sweepCancelled: "abgebrochen",
     modelLabel: "Modell",
     missingKey: (provider: string) => `Kein API-Schlüssel für ${provider}`,
     generate: "Erzeugen",
