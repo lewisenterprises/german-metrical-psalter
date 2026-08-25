@@ -23,18 +23,23 @@ export const MODELS: ModelConfig[] = [
   { id: "claude-haiku-4-5", label: "Haiku 4.5", provider: "anthropic" },
   { id: "claude-sonnet-5", label: "Sonnet 5", provider: "anthropic" },
   { id: "claude-opus-4-8", label: "Opus 4.8", provider: "anthropic" },
+  { id: "claude-opus-5", label: "Opus 5", provider: "anthropic" },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", provider: "openai" },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", provider: "openai" },
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai" },
-  { id: "gemini-3.1-flash-lite", label: "3.1 Flash Lite", provider: "google" },
-  { id: "gemini-3.5-flash", label: "3.5 Flash", provider: "google" },
+  { id: "gemini-3.5-flash-lite", label: "3.5 Flash Lite", provider: "google" },
+  { id: "gemini-3.7-flash", label: "3.7 Flash", provider: "google" },
   { id: "gemini-3.1-pro-preview", label: "3.1 Pro (Preview)", provider: "google" },
-  { id: "grok-4.5", label: "Grok 4.5", provider: "xai" },
+  { id: "grok-4.6", label: "Grok 4.6", provider: "xai" },
   { id: "deepseek-v4-flash", label: "V4 Flash", provider: "deepseek" },
   { id: "deepseek-v4-pro", label: "V4 Pro", provider: "deepseek" },
-  { id: "meta-llama/llama-4-maverick", label: "Llama 4 Maverick", provider: "openrouter" },
-  { id: "qwen/qwen3.7-plus", label: "Qwen 3.7 Plus", provider: "openrouter" },
-  { id: "moonshotai/kimi-k2-0905", label: "Kimi K2", provider: "openrouter" },
+  // Deliberately the small/flash tiers, not the flagships. The flagship open
+  // models (Qwen3.8 Max, Kimi K3, GLM 5.3) are far too slow to sweep twelve
+  // metres against; these trade accuracy for a turnaround that makes the sweep
+  // usable. Expect metre and fidelity errors here — that is the accepted cost.
+  { id: "mistralai/mistral-small-2603", label: "Mistral Small", provider: "openrouter" },
+  { id: "qwen/qwen3.7-flash", label: "Qwen 3.7 Flash", provider: "openrouter" },
+  { id: "z-ai/glm-4.7-flash", label: "GLM 4.7 Flash", provider: "openrouter" },
 ];
 
 export function findModel(id: string): ModelConfig | undefined {
