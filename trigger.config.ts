@@ -9,4 +9,5 @@ export default defineConfig({
   dirs: ["./src/trigger"],
   // Generous ceiling for long psalms; individual tasks can override.
   maxDuration: 3600,
+  runtime: "node-24"
 });
