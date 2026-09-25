@@ -5,6 +5,7 @@ import { STRINGS, type Lang } from "@/lib/i18n";
 import { buildSystemPrompt } from "@/lib/prompt";
 import { METERS, findMeter } from "@/lib/meters";
 import {
+  DEFAULT_MODEL,
   DEFAULT_PREFS,
   PREFS_STORAGE_KEY,
   PROMPT_STORAGE_KEY,
@@ -420,10 +421,17 @@ export function Psalter() {
   // once models have loaded and whenever the selected model changes (e.g. after
   // session settings are restored on mount). Adjusted during render rather than
   // in an effect, so the expanded group shows without an extra pass.
+  // The list is discovered live, so a saved model can drop out of it (or lose
+  // its key); fall back to the default, else the first usable model, rather
+  // than leave Generate pointing at an id the route will reject.
   const [expandedFor, setExpandedFor] = useState({ models, model });
   if (expandedFor.models !== models || expandedFor.model !== model) {
     setExpandedFor({ models, model });
-    const selected = models.find((m) => m.id === model);
+    const selected = models.find((m) => m.id === model && m.available);
+    const fallback =
+      models.find((m) => m.id === DEFAULT_MODEL && m.available) ??
+      models.find((m) => m.available);
+    if (!selected && fallback) setModel(fallback.id);
     if (selected && collapsedProviders.has(selected.provider)) {
       const next = new Set(collapsedProviders);
       next.delete(selected.provider);

@@ -8,7 +8,8 @@ import {
   TRIAL_CONTEXT_VERSES,
 } from "@/lib/prompt";
 import { findMeter } from "@/lib/meters";
-import { findModel, MODELS, discoverLMStudioModels } from "@/lib/providers";
+import { findModel, discoverLMStudioModels } from "@/lib/providers";
+import { listCloudModels } from "@/lib/discovery";
 import { getRedis } from "@/lib/redis";
 import { DEFAULT_MODEL } from "@/lib/prefs";
 import { writeJob, setRunId } from "@/lib/jobs";
@@ -74,14 +75,21 @@ export async function POST(req: NextRequest) {
     return json(400, { error: "variants must be an integer between 1 and 5" });
   }
 
+  // Curated first (no network), then the discovered cloud models (cached),
+  // then whatever LM Studio has loaded.
   let model = findModel(modelId);
+  const cloud = model ? [] : await listCloudModels();
   if (!model) {
-    const local = await discoverLMStudioModels();
-    model = local.find((m) => m.id === modelId);
+    const found = cloud.find((m) => m.id === modelId);
+    if (found) model = { id: found.id, label: found.label, provider: found.provider };
   }
+  const local = model ? [] : await discoverLMStudioModels();
+  if (!model) model = local.find((m) => m.id === modelId);
   if (!model) {
     return json(400, {
-      error: `unknown model "${modelId}". Known: ${MODELS.map((m) => m.id).join(", ")}`,
+      error: `unknown model "${modelId}". Known: ${[...cloud, ...local]
+        .map((m) => m.id)
+        .join(", ")}`,
     });
   }
 

@@ -60,7 +60,7 @@ There is no test runner.
 ```
 src/app/page.tsx          (UI: psalm grid, variants slider, provider chips, EN/DE toggle, SSE reader)
 src/app/api/psalm/[n]     (GET: bundled Hebrew lookup)
-src/app/api/models        (GET: registry + per-model availability + LM Studio discovery)
+src/app/api/models        (GET: discovered + curated models, per-model availability, LM Studio discovery)
 src/app/api/generate      (POST: SSE stream of generation events)
 ```
 
@@ -80,11 +80,15 @@ Per-provider quirks already baked in — don't undo without good reason:
 - **`stream_options.include_usage` is skipped for DeepSeek and LM Studio.** Their compat layers silently break streaming when they don't recognise it.
 - **DeepSeek emits `delta.reasoning_content` during the thinking phase**, then switches to `delta.content`. The streaming loop counts both and emits `thinking` events to the client during reasoning so the UI doesn't look frozen.
 - **LM Studio uses a dummy `apiKey: "lm-studio"`** (the SDK requires non-empty) and discovers loaded models at runtime via `GET /v1/models`, filtering out embedding/whisper/TTS models that can't do chat completions.
-- **Provider availability** is determined by env-key presence (see `ENV_KEYS` in `/api/models/route.ts`). LM Studio is "available" iff the local server responds.
+- **Provider availability** is determined by env-key presence (see `ENV_KEYS` in `src/lib/discovery.ts`). LM Studio is "available" iff the local server responds.
 
 ### Models registry
 
-Static cloud models live in the `MODELS` array. LM Studio models are discovered dynamically by `discoverLMStudioModels()` and merged in by `/api/models`. The generate route falls back to LM Studio discovery if `findModel(id)` misses, so any loaded local model is callable without registry edits.
+Cloud models are discovered live by `src/lib/discovery.ts` (server-only; the Trigger.dev task gets a resolved `ModelConfig` in its payload and never imports it). For each provider whose env key is set, `listCloudModels()` queries its models endpoint in parallel (5s timeout each) — Anthropic `/v1/models`, OpenAI `/v1/models`, Google's native `v1beta/models`, xAI `/v1/language-models` (falling back to `/v1/models`), DeepSeek `/models` — and filters to text chat models this app can drive: no image/video/audio/TTS/transcription/realtime/embedding/moderation/search/computer-use/codex models, no dated snapshots whose undated alias is known, no OpenAI `-pro` (Responses-API only) or legacy models without json_schema, no Claude models that report no structured-output support or can't take `thinking: disabled`. Results are cached in module memory for an hour (five minutes after a failure).
+
+`MODELS` in `providers.ts` is the curated overrides and fallback list. A curated entry the provider still lists keeps its label and position (small-to-large); other discovered models are appended after it within the provider, labelled from the API (`display_name`/`displayName`, provider prefix stripped) or humanised from the id. A curated entry that a successful query doesn't list is dropped. If a provider's query fails or nothing survives the filter, or its key is missing, the picker shows its curated entries. **OpenRouter is not discovered** — it lists hundreds of models, and its curated small/flash tiers are a deliberate choice (see the comment in `MODELS`).
+
+LM Studio models are discovered by `discoverLMStudioModels()` and merged in by `/api/models`. The generate route resolves an id via `findModel` (curated), then the discovered list (cached), then LM Studio, so any listed or loaded model is callable without registry edits. The UI falls back to `DEFAULT_MODEL`, else the first available model, when a saved choice is no longer in the list.
 
 ### SSE protocol (`/api/generate`)
 
@@ -138,8 +142,8 @@ Missing keys are not an error — corresponding chips are marked `available: fal
 
 ## When adding a provider or model
 
-- **New provider:** add to `Provider` union, add `ENDPOINTS` entry, add to the `generateVariants` switch, add to `ENV_KEYS` in `/api/models`, add to `PROVIDER_LABEL` and `PROVIDER_ORDER` in `page.tsx`, add to `.env.local.example`.
-- **New model on an existing provider:** add a `MODELS` entry. Sort within provider rows small-to-large — this is a deliberate convention.
+- **New provider:** add to `Provider` union, add `ENDPOINTS` entry, add to the `generateVariants` switch, add to `ENV_KEYS` in `src/lib/discovery.ts` plus a `LISTERS` entry and filter (or leave it undiscovered, like OpenRouter), add to `PROVIDER_LABEL` and `PROVIDER_ORDER` in `Psalter.tsx`, add to `.env.local.example`.
+- **New model on an existing provider:** nothing to do if discovery picks it up. Add a `MODELS` entry only to fix its label or position, to keep it visible as a fallback, or for OpenRouter. Sort within provider rows small-to-large — this is a deliberate convention. If discovery shows junk or hides a usable model, adjust that provider's filter in `discovery.ts`.
 - **Verify new model IDs against the provider's live `/v1/models` endpoint** before relying on vendor-doc IDs — they frequently disagree with what's actually served (e.g. Google's `gemini-3.1-pro` doesn't exist as a plain ID; only `gemini-3.1-pro-preview` does).
 
 

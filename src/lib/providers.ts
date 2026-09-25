@@ -19,6 +19,11 @@ export interface ModelConfig {
   provider: Provider;
 }
 
+// Curated models: the fallback and the overrides for live discovery
+// (src/lib/discovery.ts). Where a provider still lists one of these, it keeps
+// this label and position; models discovered beyond them are appended. If a
+// provider's query fails, or its key is missing, the picker shows these.
+// OpenRouter isn't discovered, so its entries here are the whole list.
 export const MODELS: ModelConfig[] = [
   { id: "claude-haiku-4-5", label: "Haiku 4.5", provider: "anthropic" },
   { id: "claude-sonnet-5", label: "Sonnet 5", provider: "anthropic" },
