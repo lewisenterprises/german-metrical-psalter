@@ -53,6 +53,9 @@ export const STRINGS = {
     streamingChars: (chars: number, s: number) =>
       `Receiving… ${chars.toLocaleString()} chars in ${s}s`,
     showRaw: "Show raw stream",
+    showReasoning: "Show reasoning",
+    reasoningTruncated: (chars: number) =>
+      `… ${chars.toLocaleString()} earlier characters not shown`,
     versionHeader: (n: number) => `Version ${n}`,
     copy: "Copy",
     usage: (input: number, output: number, cached?: number) =>
@@ -129,6 +132,9 @@ export const STRINGS = {
     streamingChars: (chars: number, s: number) =>
       `Empfange… ${chars.toLocaleString()} Zeichen in ${s}s`,
     showRaw: "Rohdaten anzeigen",
+    showReasoning: "Überlegungen anzeigen",
+    reasoningTruncated: (chars: number) =>
+      `… ${chars.toLocaleString()} frühere Zeichen ausgeblendet`,
     versionHeader: (n: number) => `Fassung ${n}`,
     copy: "Kopieren",
     usage: (input: number, output: number, cached?: number) =>

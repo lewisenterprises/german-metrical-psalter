@@ -184,6 +184,13 @@ export function Psalter() {
   const [elapsed, setElapsed] = useState(0);
   const [streamingText, setStreamingText] = useState("");
   const [reasoningCount, setReasoningCount] = useState(0);
+  // The visible reasoning so far (a capped tail) and how many chars the job
+  // trimmed off its front.
+  const [reasoningText, setReasoningText] = useState("");
+  const [reasoningDropped, setReasoningDropped] = useState(0);
+  // The reasoning panel follows new text while the reader is at its bottom.
+  const reasoningRef = useRef<HTMLPreElement | null>(null);
+  const reasoningStickRef = useRef(true);
   // True from the start of a resumed job until its first snapshot lands, so the
   // status reads "Reconnecting…" rather than the misleading "waiting for first
   // token" (the job is already underway; we just don't have its text yet).
@@ -439,6 +446,13 @@ export function Psalter() {
     }
   }
 
+  // Keep the reasoning panel pinned to its newest text unless the reader has
+  // scrolled up.
+  useEffect(() => {
+    const el = reasoningRef.current;
+    if (el && reasoningStickRef.current) el.scrollTop = el.scrollHeight;
+  }, [reasoningText]);
+
   useEffect(() => {
     let cancelled = false;
     fetch(`/api/psalm/${psalm}`)
@@ -459,6 +473,9 @@ export function Psalter() {
     status?: string;
     text?: string;
     reasoning?: number;
+    // Sent by the live tail only when it changed; always present in a poll.
+    reasoningText?: string;
+    reasoningDropped?: number;
     createdAt?: number;
     result?: unknown;
     error?: string;
@@ -490,6 +507,8 @@ export function Psalter() {
     setResult(null);
     setStreamingText("");
     setReasoningCount(0);
+    setReasoningText("");
+    setReasoningDropped(0);
     setResuming(opts?.resume ?? false);
     startRef.current = Date.now();
     setElapsed(0);
@@ -518,6 +537,10 @@ export function Psalter() {
       if (typeof s.createdAt === "number") startRef.current = s.createdAt;
       if (typeof s.text === "string") setStreamingText(s.text);
       if (typeof s.reasoning === "number") setReasoningCount(s.reasoning);
+      if (typeof s.reasoningText === "string") {
+        setReasoningText(s.reasoningText);
+        setReasoningDropped(s.reasoningDropped ?? 0);
+      }
     };
     // Returns true once the job reached a terminal state (caller should stop).
     const handleTerminal = (s: Snapshot): boolean => {
@@ -605,7 +628,7 @@ export function Psalter() {
   ): Promise<Snapshot | null> {
     while (!signal.aborted) {
       try {
-        const res = await fetch(`/api/job/${jobId}`, { signal });
+        const res = await fetch(`/api/job/${jobId}?reasoning=0`, { signal });
         if (res.status === 404) return null;
         const job: Snapshot = await res.json();
         if (job.status && job.status !== "running") return job;
@@ -662,6 +685,8 @@ export function Psalter() {
     setResult(null);
     setStreamingText("");
     setReasoningCount(0);
+    setReasoningText("");
+    setReasoningDropped(0);
     try {
       const r = await fetch("/api/generate", {
         method: "POST",
@@ -724,6 +749,8 @@ export function Psalter() {
     setResult(null);
     setStreamingText("");
     setReasoningCount(0);
+    setReasoningText("");
+    setReasoningDropped(0);
     setError(null);
     setResuming(false);
     setGenerating(true);
@@ -1350,6 +1377,38 @@ export function Psalter() {
                   {cancelling ? t.cancelling : t.cancel}
                 </button>
               </div>
+              {!sweeping && reasoningText.length > 0 && (
+                <details
+                  className="text-xs"
+                  onToggle={(e) => {
+                    const el = reasoningRef.current;
+                    if (e.currentTarget.open && el) {
+                      el.scrollTop = el.scrollHeight;
+                      reasoningStickRef.current = true;
+                    }
+                  }}
+                >
+                  <summary className="cursor-pointer text-stone-500 hover:text-stone-800 dark:hover:text-stone-200">
+                    {t.showReasoning}
+                  </summary>
+                  <pre
+                    ref={reasoningRef}
+                    onScroll={(e) => {
+                      const el = e.currentTarget;
+                      reasoningStickRef.current =
+                        el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+                    }}
+                    className="mt-2 max-h-64 overflow-auto rounded bg-stone-100 dark:bg-stone-900 p-3 font-mono text-[0.6875rem] leading-relaxed whitespace-pre-wrap break-words text-stone-700 dark:text-stone-300"
+                  >
+                    {reasoningDropped > 0 && (
+                      <span className="block mb-2 italic text-stone-400">
+                        {t.reasoningTruncated(reasoningDropped)}
+                      </span>
+                    )}
+                    {reasoningText}
+                  </pre>
+                </details>
+              )}
               {!sweeping && streamingText.length > 0 && (
                 <details className="text-xs">
                   <summary className="cursor-pointer text-stone-500 hover:text-stone-800 dark:hover:text-stone-200">

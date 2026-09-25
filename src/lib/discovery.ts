@@ -54,11 +54,10 @@ export function filterAnthropic(data: AnthropicModel[]): Listed[] {
       (m) =>
         m.id.startsWith("claude-") &&
         // Generation sends output_config.format (json_schema); models that
-        // report no structured-output support would 400.
-        m.capabilities?.structured_outputs?.supported !== false &&
-        // Generation also sends thinking: disabled, which these reject with a
-        // 400 (their thinking is always on).
-        !/^claude-(fable|mythos)-|^claude-opus-5-5\b/.test(m.id)
+        // report no structured-output support would 400. (Fable, Mythos and
+        // Opus 5.5 were excluded until 2026-09-25 because generation sent
+        // thinking: disabled; it now sends adaptive thinking, which they take.)
+        m.capabilities?.structured_outputs?.supported !== false
     )
     .map((m) => ({
       id: m.id,
@@ -80,7 +79,10 @@ export function filterOpenAI(data: OpenAIStyleModel[]): Listed[] {
         !/image|audio|realtime|live|tts|transcribe|diarize|whisper|dall-e|embedding|moderation|search|computer-use|instruct|babbage|davinci|codex|deep-research|sora|oss/.test(
           m.id
         ) &&
-        // -pro models are Responses-API only; generation uses Chat Completions.
+        // -pro models: generation now uses the Responses API, which they need,
+        // but they are kept out deliberately — many times the price of the
+        // base model, minutes of silence per render, and their streaming
+        // support is unverified here. Drop this line to offer them.
         !/-pro\b/.test(m.id) &&
         // Legacy models without json_schema structured outputs.
         !/^gpt-3\.5|^gpt-4(-|$)|^chatgpt-4o|^o1-(mini|preview)/.test(m.id)

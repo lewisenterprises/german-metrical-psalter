@@ -39,6 +39,9 @@ export async function GET(
 
       let lastLen = -1;
       let lastReasoning = -1;
+      // Reasoning text is the bulk of a snapshot, so resend it only when it
+      // grew: its length plus the chars trimmed off its front identify it.
+      let lastReasoningMark = -1;
       let lastStatus = "";
       let lastSendAt = Date.now();
 
@@ -58,10 +61,17 @@ export async function GET(
             lastReasoning = job.reasoning;
             lastStatus = job.status;
             lastSendAt = Date.now();
+            const reasoningText = job.reasoningText ?? "";
+            const mark = (job.reasoningDropped ?? 0) + reasoningText.length;
+            const reasoningChanged = mark !== lastReasoningMark;
+            lastReasoningMark = mark;
             send({
               status: job.status,
               text: job.text,
               reasoning: job.reasoning,
+              ...(reasoningChanged
+                ? { reasoningText, reasoningDropped: job.reasoningDropped ?? 0 }
+                : {}),
               createdAt: job.createdAt,
               result: job.result,
               error: job.error,

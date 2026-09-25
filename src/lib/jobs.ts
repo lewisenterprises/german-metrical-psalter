@@ -16,6 +16,11 @@ export interface JobState {
   text: string;
   // Reasoning-chunk count for the "thinking…" indicator.
   reasoning: number;
+  // The visible reasoning text so far (the tail, capped at REASONING_TEXT_CAP
+  // chars) and how many chars were dropped from its front to stay under the
+  // cap. Optional: jobs written before 2026-09-25 lack them.
+  reasoningText?: string;
+  reasoningDropped?: number;
   createdAt: number;
   updatedAt: number;
   // Present once status === "done": { variants, meta }.
@@ -25,6 +30,32 @@ export interface JobState {
 }
 
 const TTL_SECONDS = 3600;
+
+// Every progress snapshot rewrites the whole JobState, and the live tail reads
+// it back every 400ms, so a long reasoner must not grow it without bound. Keep
+// the last REASONING_TEXT_CAP chars; trim only once it overshoots by
+// REASONING_TEXT_SLACK, so the slice isn't redone on every delta.
+export const REASONING_TEXT_CAP = 24_000;
+const REASONING_TEXT_SLACK = 4_000;
+
+// Append a reasoning delta to the capped tail. Pure, so it can be exercised
+// offline.
+export function appendReasoning(
+  text: string,
+  dropped: number,
+  delta: string
+): { text: string; dropped: number } {
+  let next = text + delta;
+  if (next.length <= REASONING_TEXT_CAP + REASONING_TEXT_SLACK) {
+    return { text: next, dropped };
+  }
+  let cut = next.length - REASONING_TEXT_CAP;
+  // Don't split a surrogate pair.
+  const c = next.charCodeAt(cut);
+  if (c >= 0xdc00 && c <= 0xdfff) cut++;
+  next = next.slice(cut);
+  return { text: next, dropped: dropped + cut };
+}
 const key = (id: string) => `psalter:job:${id}`;
 // Stored in its own key so the worker's progress snapshots (which rebuild the
 // JobState) never clobber it. The cancel endpoint reads it to cancel the run.
@@ -80,8 +111,13 @@ export async function runJob(id: string, params: RunParams): Promise<void> {
   const { model, systemPrompt, userPrompt, schema, createdAt } = params;
   let text = "";
   let reasoning = 0;
+  let reasoningText = "";
+  let reasoningDropped = 0;
   let finished = false;
   let flushing = false;
+  // Set whenever text or reasoning changes, so the ticker skips writes while
+  // the model is silent.
+  let dirty = true;
 
   const snapshot = (status: JobStatus): JobState => ({
     id,
@@ -90,18 +126,23 @@ export async function runJob(id: string, params: RunParams): Promise<void> {
     provider: model.provider,
     text,
     reasoning,
+    reasoningText,
+    reasoningDropped,
     createdAt,
     updatedAt: Date.now(),
   });
 
-  // Persist a progress snapshot every 500ms so the live view stays current.
+  // Persist a progress snapshot at most every 500ms, when something changed, so
+  // the live view stays current.
   const tick = setInterval(async () => {
-    if (finished || flushing) return;
+    if (finished || flushing || !dirty) return;
     flushing = true;
+    dirty = false;
     try {
       await writeJob(snapshot("running"));
     } catch {
-      // Transient Redis hiccup — the next tick will retry.
+      // Transient Redis hiccup — retry on the next tick.
+      dirty = true;
     } finally {
       flushing = false;
     }
@@ -124,9 +165,16 @@ export async function runJob(id: string, params: RunParams): Promise<void> {
       schema,
       onChunk: (delta) => {
         text += delta;
+        dirty = true;
       },
-      onReasoning: (count) => {
+      onReasoning: (delta, count) => {
         reasoning = count;
+        ({ text: reasoningText, dropped: reasoningDropped } = appendReasoning(
+          reasoningText,
+          reasoningDropped,
+          delta
+        ));
+        dirty = true;
       },
     });
     await finish();

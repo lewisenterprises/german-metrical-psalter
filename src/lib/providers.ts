@@ -122,7 +122,10 @@ export interface GenerateInput {
   userPrompt: string;
   schema: object;
   onChunk?: (delta: string) => void;
-  onReasoning?: (chunkCount: number) => void;
+  // Visible reasoning text as it streams (DeepSeek/OpenRouter/LM Studio
+  // reasoning_content, Claude's summarized thinking, OpenAI's reasoning
+  // summaries), with the running count of reasoning deltas so far.
+  onReasoning?: (delta: string, chunkCount: number) => void;
   // Aborts the upstream model request when the client disconnects/cancels, so a
   // long-thinking model stops burning tokens instead of running to maxDuration.
   signal?: AbortSignal;
@@ -147,6 +150,7 @@ export async function generateVariants(input: GenerateInput): Promise<GenerateOu
     case "anthropic":
       return generateAnthropic(input);
     case "openai":
+      return generateOpenAIResponses(input);
     case "xai":
     case "google":
       return generateOpenAICompat(input, input.model.provider, /* schemaSupport */ true);
@@ -160,58 +164,275 @@ export async function generateVariants(input: GenerateInput): Promise<GenerateOu
   }
 }
 
+// Claude models before 4.6 only take the fixed-budget form of thinking (and no
+// effort); 4.6 and later take adaptive thinking plus output_config.effort, and
+// the newest (Fable, Mythos, Opus 5.5) reject anything else. Other claude-3
+// models have no thinking at all; they are no longer served.
+const CLAUDE_BUDGET_THINKING =
+  /^claude-(?:3-7-|(?:haiku|sonnet|opus)-4(?:-[015])?(?:-\d{8})?$)/;
+// Thinking effort for adaptive models. It governs the whole response's token
+// spend, not only the thinking; "medium" keeps it modest without starving the
+// rendering itself (thinking was off entirely before 2026-09-25).
+const CLAUDE_EFFORT = "medium" as const;
+// Budget for the pre-4.6 models, which must also stay below max_tokens.
+const CLAUDE_THINKING_BUDGET = 2048;
+
+type ClaudeThinkingStyle = "adaptive" | "budget";
+
+function claudeThinkingParams(style: ClaudeThinkingStyle) {
+  return style === "adaptive"
+    ? {
+        // display: "summarized" — the default on current models is "omitted",
+        // which streams thinking blocks with empty text (a silent pause).
+        thinking: { type: "adaptive", display: "summarized" } as const,
+        effort: CLAUDE_EFFORT,
+      }
+    : {
+        // Pre-4.6 models return summarized thinking by default.
+        thinking: { type: "enabled", budget_tokens: CLAUDE_THINKING_BUDGET } as const,
+        effort: undefined,
+      };
+}
+
 async function generateAnthropic(input: GenerateInput): Promise<GenerateOutput> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new ProviderError("ANTHROPIC_API_KEY is not set", 401);
 
   const client = new Anthropic({ apiKey });
-  const stream = client.messages.stream({
-    model: input.model.id,
-    max_tokens: 16000,
-    thinking: { type: "disabled" },
-    system: [
-      {
-        type: "text",
-        text: input.systemPrompt,
-        cache_control: { type: "ephemeral" },
-      },
-    ],
-    messages: [{ role: "user", content: input.userPrompt }],
-    output_config: {
-      format: { type: "json_schema", schema: input.schema as { [k: string]: unknown } },
-    },
-  }, { signal: input.signal });
+  let style: ClaudeThinkingStyle = CLAUDE_BUDGET_THINKING.test(input.model.id)
+    ? "budget"
+    : "adaptive";
+  let emitted = false;
+  let reasoningChunks = 0;
 
-  if (input.onChunk) {
-    stream.on("text", (delta) => input.onChunk?.(delta));
+  for (let attempt = 0; ; attempt++) {
+    const { thinking, effort } = claudeThinkingParams(style);
+    const stream = client.messages.stream({
+      model: input.model.id,
+      // Thinking tokens count against max_tokens, so leave room for both.
+      max_tokens: 32000,
+      thinking,
+      system: [
+        {
+          type: "text",
+          text: input.systemPrompt,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [{ role: "user", content: input.userPrompt }],
+      output_config: {
+        format: { type: "json_schema", schema: input.schema as { [k: string]: unknown } },
+        ...(effort ? { effort } : {}),
+      },
+    }, { signal: input.signal });
+
+    stream.on("text", (delta) => {
+      emitted = true;
+      input.onChunk?.(delta);
+    });
+    stream.on("thinking", (delta) => {
+      if (!delta) return;
+      emitted = true;
+      reasoningChunks++;
+      input.onReasoning?.(delta, reasoningChunks);
+    });
+
+    let final: Anthropic.Message;
+    try {
+      final = await stream.finalMessage();
+    } catch (err) {
+      // If the id-based guess picked the thinking form this model rejects, the
+      // 400 comes back before any output (and is not billed): retry once with
+      // the other form.
+      if (
+        attempt === 0 &&
+        !emitted &&
+        err instanceof Anthropic.BadRequestError &&
+        /thinking|adaptive|budget|effort|display/i.test(err.message)
+      ) {
+        console.log(
+          `[anthropic] ${input.model.id} rejected ${style} thinking, retrying: ${err.message}`
+        );
+        style = style === "adaptive" ? "budget" : "adaptive";
+        continue;
+      }
+      throw err;
+    }
+
+    const text = final.content.find(
+      (b): b is Anthropic.TextBlock => b.type === "text"
+    )?.text;
+    if (!text) {
+      throw new ProviderError(
+        `Anthropic returned no text content (stop_reason=${final.stop_reason})`,
+        502
+      );
+    }
+
+    return {
+      json: safeParse(text),
+      stopReason: final.stop_reason ?? "unknown",
+      usage: {
+        input_tokens: final.usage.input_tokens,
+        output_tokens: final.usage.output_tokens,
+        cache_read_input_tokens: final.usage.cache_read_input_tokens ?? 0,
+        cache_creation_input_tokens: final.usage.cache_creation_input_tokens ?? 0,
+      },
+    };
+  }
+}
+
+// OpenAI reasoning models: the o-series and GPT-5 family, except the -chat
+// aliases, which are non-reasoning (as are gpt-4o / gpt-4.1). Non-reasoning
+// models reject the `reasoning` parameter.
+const OPENAI_REASONING = /^(?:o\d|gpt-5)/;
+const OPENAI_NON_REASONING = /-chat\b|^chatgpt-/;
+// Low effort keeps reasoning (and its summaries) on without much spend. GPT-5.1
+// and later default to "none", which would think and summarise nothing; older
+// reasoning models default to "medium".
+const OPENAI_EFFORT = "low" as const;
+
+// The openai provider runs on the Responses API rather than Chat Completions,
+// because only Responses streams reasoning summaries.
+async function generateOpenAIResponses(input: GenerateInput): Promise<GenerateOutput> {
+  const k = process.env.OPENAI_API_KEY;
+  if (!k) throw new ProviderError("OPENAI_API_KEY is not set", 401);
+  const client = new OpenAI({ apiKey: k, timeout: 790_000, maxRetries: 0 });
+  const id = input.model.id;
+
+  const isReasoning = OPENAI_REASONING.test(id) && !OPENAI_NON_REASONING.test(id);
+  // -pro models accept only their own default effort, so leave it unset there.
+  let reasoning: { effort?: typeof OPENAI_EFFORT; summary?: "auto" } | undefined =
+    isReasoning
+      ? { ...(/-pro\b/.test(id) ? {} : { effort: OPENAI_EFFORT }), summary: "auto" }
+      : undefined;
+
+  const open = () =>
+    client.responses.create({
+      model: id,
+      instructions: input.systemPrompt,
+      input: input.userPrompt,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "psalter_variants",
+          schema: input.schema as Record<string, unknown>,
+          strict: true,
+        },
+      },
+      ...(reasoning ? { reasoning } : {}),
+      // Chat Completions never stored requests; keep it that way.
+      store: false,
+      stream: true,
+    }, { signal: input.signal });
+
+  const t0 = Date.now();
+  let stream: Awaited<ReturnType<typeof open>> | null = null;
+  while (!stream) {
+    try {
+      stream = await open();
+    } catch (err) {
+      // A 400 on the reasoning options arrives before any output and is not
+      // billed. Reasoning summaries need a verified organisation, and a model
+      // the regex misjudges may reject `reasoning` outright: step down once
+      // each rather than failing the render.
+      if (!(err instanceof OpenAI.BadRequestError) || !reasoning) throw err;
+      if (reasoning.summary && /summar|verif/i.test(err.message)) {
+        console.log(`[openai] ${id}: reasoning summaries refused, retrying without: ${err.message}`);
+        reasoning = reasoning.effort ? { effort: reasoning.effort } : undefined;
+      } else if (/reasoning|effort/i.test(err.message)) {
+        console.log(`[openai] ${id}: reasoning params refused, retrying without: ${err.message}`);
+        reasoning = undefined;
+      } else {
+        throw err;
+      }
+    }
   }
 
-  const final = await stream.finalMessage();
-  const text = final.content.find(
-    (b): b is Anthropic.TextBlock => b.type === "text"
-  )?.text;
+  let text = "";
+  let refusal = "";
+  let reasoningChunks = 0;
+  let reasoningChars = 0;
+  let needBreak = false;
+  let firstTokenAt: number | null = null;
+  let finalResponse: OpenAI.Responses.Response | null = null;
+
+  for await (const ev of stream) {
+    switch (ev.type) {
+      case "response.reasoning_summary_part.added":
+        // Each summary part is its own paragraph.
+        if (reasoningChars > 0) needBreak = true;
+        break;
+      case "response.reasoning_summary_text.delta": {
+        if (!ev.delta) break;
+        const delta = needBreak ? `\n\n${ev.delta}` : ev.delta;
+        needBreak = false;
+        reasoningChunks++;
+        reasoningChars += delta.length;
+        input.onReasoning?.(delta, reasoningChunks);
+        break;
+      }
+      case "response.output_text.delta":
+        if (firstTokenAt === null) {
+          firstTokenAt = Date.now() - t0;
+          console.log(`[openai] first content token after ${firstTokenAt}ms`);
+        }
+        text += ev.delta;
+        input.onChunk?.(ev.delta);
+        break;
+      case "response.refusal.delta":
+        refusal += ev.delta;
+        break;
+      case "response.completed":
+      case "response.incomplete":
+      case "response.failed":
+        finalResponse = ev.response;
+        break;
+      case "error":
+        throw new ProviderError(`openai stream error: ${ev.message}`, 502);
+    }
+  }
+
+  const status = finalResponse?.status ?? "unknown";
+  const stopReason =
+    status === "incomplete"
+      ? `incomplete:${finalResponse?.incomplete_details?.reason ?? "unknown"}`
+      : status;
+  console.log(
+    `[openai] stream ended after ${Date.now() - t0}ms, status=${stopReason}, reasoning_chunks=${reasoningChunks}, chars=${text.length}`
+  );
+
+  if (status === "failed") {
+    throw new ProviderError(
+      `openai response failed: ${finalResponse?.error?.message ?? "unknown error"}`,
+      502
+    );
+  }
   if (!text) {
     throw new ProviderError(
-      `Anthropic returned no text content (stop_reason=${final.stop_reason})`,
+      refusal
+        ? `openai refused: ${refusal.slice(0, 200)}`
+        : `openai returned no message content (status=${stopReason})`,
       502
     );
   }
 
+  const u = finalResponse?.usage;
   return {
     json: safeParse(text),
-    stopReason: final.stop_reason ?? "unknown",
+    stopReason,
     usage: {
-      input_tokens: final.usage.input_tokens,
-      output_tokens: final.usage.output_tokens,
-      cache_read_input_tokens: final.usage.cache_read_input_tokens ?? 0,
-      cache_creation_input_tokens: final.usage.cache_creation_input_tokens ?? 0,
+      input_tokens: u?.input_tokens ?? 0,
+      output_tokens: u?.output_tokens ?? 0,
+      cache_read_input_tokens: u?.input_tokens_details?.cached_tokens ?? 0,
+      reasoning_tokens: u?.output_tokens_details?.reasoning_tokens ?? 0,
     },
   };
 }
 
 async function generateOpenAICompat(
   input: GenerateInput,
-  provider: "openai" | "google" | "xai" | "deepseek" | "openrouter" | "lmstudio",
+  provider: "google" | "xai" | "deepseek" | "openrouter" | "lmstudio",
   schemaSupport: boolean
 ): Promise<GenerateOutput> {
   const endpoint = ENDPOINTS[provider];
@@ -281,8 +502,8 @@ async function generateOpenAICompat(
       | { content?: string; reasoning_content?: string; reasoning?: string }
       | undefined;
     // DeepSeek-direct emits `reasoning_content`; OpenRouter normalizes the same
-    // tokens into `reasoning`. Treat them interchangeably so the thinking
-    // indicator works for both.
+    // tokens into `reasoning`. Treat them interchangeably: the text streams to
+    // the Reasoning panel and the count drives the thinking indicator.
     const reasoning = delta?.reasoning_content ?? delta?.reasoning;
 
     if (chunkIndex === 1) {
@@ -301,7 +522,7 @@ async function generateOpenAICompat(
       if (reasoningChunks % 100 === 0) {
         console.log(`[${provider}] ${reasoningChunks} reasoning chunks…`);
       }
-      input.onReasoning?.(reasoningChunks);
+      input.onReasoning?.(reasoning, reasoningChunks);
     }
 
     if (delta?.content) {
