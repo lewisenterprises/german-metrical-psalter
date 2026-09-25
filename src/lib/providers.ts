@@ -101,12 +101,10 @@ interface ProviderEndpoint {
   baseURL?: string;
 }
 
-const ENDPOINTS: Record<Exclude<Provider, "anthropic">, ProviderEndpoint> = {
+// Google isn't here: it runs on its native API (generateGeminiNative), not the
+// OpenAI-compatible endpoint.
+const ENDPOINTS: Record<Exclude<Provider, "anthropic" | "google">, ProviderEndpoint> = {
   openai: { envKey: "OPENAI_API_KEY" },
-  google: {
-    envKey: "GOOGLE_API_KEY",
-    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
-  },
   xai: { envKey: "XAI_API_KEY", baseURL: "https://api.x.ai/v1" },
   deepseek: { envKey: "DEEPSEEK_API_KEY", baseURL: "https://api.deepseek.com/v1" },
   openrouter: {
@@ -124,7 +122,8 @@ export interface GenerateInput {
   onChunk?: (delta: string) => void;
   // Visible reasoning text as it streams (DeepSeek/OpenRouter/LM Studio
   // reasoning_content, Claude's summarized thinking, OpenAI's reasoning
-  // summaries), with the running count of reasoning deltas so far.
+  // summaries, Gemini's thought summaries), with the running count of
+  // reasoning deltas so far.
   onReasoning?: (delta: string, chunkCount: number) => void;
   // Aborts the upstream model request when the client disconnects/cancels, so a
   // long-thinking model stops burning tokens instead of running to maxDuration.
@@ -151,8 +150,9 @@ export async function generateVariants(input: GenerateInput): Promise<GenerateOu
       return generateAnthropic(input);
     case "openai":
       return generateOpenAIResponses(input);
-    case "xai":
     case "google":
+      return generateGeminiNative(input);
+    case "xai":
       return generateOpenAICompat(input, input.model.provider, /* schemaSupport */ true);
     case "deepseek":
     case "openrouter":
@@ -430,9 +430,229 @@ async function generateOpenAIResponses(input: GenerateInput): Promise<GenerateOu
   };
 }
 
+// Gemini runs on the native generateContent API rather than Google's
+// OpenAI-compatible endpoint, because only the native API returns thought
+// summaries as their own parts (`thought: true`). The compat endpoint documents
+// no separate thought field and appears to fold them into the message content,
+// where they would break the JSON.
+const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models";
+
+// How much of the thinking config to send. "tuned" caps thinking low: Gemini
+// 3.x otherwise defaults to a generous dynamic level, and a "Flash" model can
+// sit silent for 90s+ before its first token. 3.x takes thinkingLevel, 2.x
+// only thinkingBudget (thinkingLevel is an error there); 1,024 tokens is what
+// reasoning_effort "low" mapped to on the compat endpoint. "summaries" drops
+// the cap but still asks for thought summaries; "off" sends no thinking config,
+// for a model that rejects it outright.
+type GeminiThinking = "tuned" | "summaries" | "off";
+
+function geminiThinkingConfig(id: string, mode: GeminiThinking) {
+  if (mode === "off") return undefined;
+  if (mode === "summaries") return { includeThoughts: true };
+  return /^gemini-[12]\./.test(id)
+    ? { includeThoughts: true, thinkingBudget: 1024 }
+    : { includeThoughts: true, thinkingLevel: "LOW" };
+}
+
+interface GeminiPart {
+  text?: string;
+  thought?: boolean;
+  thoughtSignature?: string;
+}
+
+interface GeminiStreamChunk {
+  candidates?: Array<{
+    content?: { parts?: GeminiPart[] };
+    finishReason?: string;
+    finishMessage?: string;
+  }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    thoughtsTokenCount?: number;
+    cachedContentTokenCount?: number;
+  };
+  promptFeedback?: { blockReason?: string };
+  error?: { code?: number; message?: string; status?: string };
+}
+
+// Yields the parsed JSON of each `data:` event in a server-sent-event body.
+// Events can arrive split across network chunks (or several to a chunk), so
+// bytes are buffered until a blank line ends the event.
+async function* readSSEJson(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  const parse = (event: string): unknown => {
+    const data = event
+      .split(/\r?\n/)
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).replace(/^ /, ""))
+      .join("\n");
+    if (!data || data === "[DONE]") return undefined;
+    try {
+      return JSON.parse(data);
+    } catch {
+      throw new ProviderError(`google sent an unreadable stream event: ${data.slice(0, 200)}`, 502);
+    }
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      buf += decoder.decode(value, { stream: !done });
+      let m: RegExpExecArray | null;
+      while ((m = /\r?\n\r?\n/.exec(buf))) {
+        const ev = parse(buf.slice(0, m.index));
+        buf = buf.slice(m.index + m[0].length);
+        if (ev !== undefined) yield ev;
+      }
+      if (done) break;
+    }
+    const tail = parse(buf);
+    if (tail !== undefined) yield tail;
+  } finally {
+    // Also runs when the consumer stops early (an error event, a throw): close
+    // the connection rather than leave the upstream stream running.
+    await reader.cancel().catch(() => {});
+  }
+}
+
+async function generateGeminiNative(input: GenerateInput): Promise<GenerateOutput> {
+  const apiKey = process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new ProviderError("GOOGLE_API_KEY is not set", 401);
+  const id = input.model.id;
+
+  let thinking: GeminiThinking = "tuned";
+  const open = () => {
+    const thinkingConfig = geminiThinkingConfig(id, thinking);
+    return fetch(`${GEMINI_API}/${encodeURIComponent(id)}:streamGenerateContent?alt=sse`, {
+      method: "POST",
+      // The key goes in a header rather than ?key= so it stays out of URLs.
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: input.systemPrompt }] },
+        contents: [{ role: "user", parts: [{ text: input.userPrompt }] }],
+        // No maxOutputTokens: it counts thinking too, and the model's own limit
+        // (what the compat endpoint used) leaves room for the longest psalms.
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseJsonSchema: input.schema,
+          ...(thinkingConfig ? { thinkingConfig } : {}),
+        },
+      }),
+      signal: input.signal,
+    });
+  };
+
+  const t0 = Date.now();
+  let res: Response;
+  for (;;) {
+    res = await open();
+    if (res.ok) break;
+    const raw = await res.text().catch(() => "");
+    let message = raw.slice(0, 500);
+    try {
+      message = (JSON.parse(raw) as GeminiStreamChunk).error?.message ?? message;
+    } catch {
+      // Not JSON; keep the raw text.
+    }
+    // A 400 on the thinking config arrives before any output and is not
+    // billed. A model that takes neither thinkingLevel nor thinkingBudget, or no
+    // thinking config at all, steps down once each rather than failing.
+    if (res.status === 400 && thinking !== "off" && /think|budget|level/i.test(message)) {
+      const next: GeminiThinking = thinking === "tuned" ? "summaries" : "off";
+      console.log(`[google] ${id}: thinking config (${thinking}) refused, retrying as ${next}: ${message}`);
+      thinking = next;
+      continue;
+    }
+    throw new ProviderError(`google ${res.status}: ${message}`, res.status);
+  }
+  if (!res.body) throw new ProviderError("google returned an empty stream", 502);
+
+  let text = "";
+  let reasoningText = "";
+  let reasoningChunks = 0;
+  let firstTokenAt: number | null = null;
+  let firstReasoningAt: number | null = null;
+  let finishReason = "unknown";
+  let finishMessage = "";
+  let blockReason = "";
+  let usage: NonNullable<GeminiStreamChunk["usageMetadata"]> = {};
+
+  for await (const ev of readSSEJson(res.body)) {
+    const chunk = ev as GeminiStreamChunk;
+    if (chunk.error) {
+      throw new ProviderError(
+        `google stream error: ${chunk.error.message ?? chunk.error.status ?? "unknown"}`,
+        502
+      );
+    }
+    if (chunk.usageMetadata) usage = chunk.usageMetadata;
+    if (chunk.promptFeedback?.blockReason) blockReason = chunk.promptFeedback.blockReason;
+    const cand = chunk.candidates?.[0];
+    if (cand?.finishReason) finishReason = cand.finishReason;
+    if (cand?.finishMessage) finishMessage = cand.finishMessage;
+
+    for (const part of cand?.content?.parts ?? []) {
+      // Parts can carry only a thoughtSignature, with no text.
+      if (!part.text) continue;
+      if (part.thought) {
+        if (firstReasoningAt === null) {
+          firstReasoningAt = Date.now() - t0;
+          console.log(`[google] reasoning started after ${firstReasoningAt}ms`);
+        }
+        // Each summary section starts with a bold heading, often with no
+        // separator from the one before; give each its own paragraph. (Only
+        // after a finished sentence, so a bold word mid-sentence is left alone.)
+        const delta =
+          part.text.startsWith("**") && /[.!?]$/.test(reasoningText)
+            ? `\n\n${part.text}`
+            : part.text;
+        reasoningText += delta;
+        reasoningChunks++;
+        input.onReasoning?.(delta, reasoningChunks);
+      } else {
+        if (firstTokenAt === null) {
+          firstTokenAt = Date.now() - t0;
+          console.log(
+            `[google] first content token after ${firstTokenAt}ms` +
+              (firstReasoningAt !== null ? ` (reasoned for ${firstTokenAt - firstReasoningAt}ms)` : "")
+          );
+        }
+        text += part.text;
+        input.onChunk?.(part.text);
+      }
+    }
+  }
+
+  console.log(
+    `[google] stream ended after ${Date.now() - t0}ms, thinking=${thinking}, reasoning_chunks=${reasoningChunks}, chars=${text.length}, finish=${finishReason}`
+  );
+
+  if (!text) {
+    const why = blockReason
+      ? `prompt blocked: ${blockReason}`
+      : `finish_reason=${finishReason}${finishMessage ? `: ${finishMessage}` : ""}`;
+    throw new ProviderError(`google returned no message content (${why})`, 502);
+  }
+
+  const thoughts = usage.thoughtsTokenCount ?? 0;
+  return {
+    json: safeParse(text),
+    stopReason: finishReason,
+    usage: {
+      input_tokens: usage.promptTokenCount ?? 0,
+      // Thinking is billed as output, as OpenAI's output_tokens counts it.
+      output_tokens: (usage.candidatesTokenCount ?? 0) + thoughts,
+      cache_read_input_tokens: usage.cachedContentTokenCount ?? 0,
+      reasoning_tokens: thoughts,
+    },
+  };
+}
+
 async function generateOpenAICompat(
   input: GenerateInput,
-  provider: "google" | "xai" | "deepseek" | "openrouter" | "lmstudio",
+  provider: "xai" | "deepseek" | "openrouter" | "lmstudio",
   schemaSupport: boolean
 ): Promise<GenerateOutput> {
   const endpoint = ENDPOINTS[provider];
@@ -480,10 +700,6 @@ async function generateOpenAICompat(
     ...(provider === "deepseek" || provider === "lmstudio"
       ? {}
       : { stream_options: { include_usage: true } }),
-    // Gemini 3.x defaults to a generous dynamic thinking budget, so a "Flash"
-    // model can sit silent for 90s+ before its first token. Google's compat
-    // endpoint maps reasoning_effort to the thinking budget — cap it low.
-    ...(provider === "google" ? { reasoning_effort: "low" as const } : {}),
   }, { signal: input.signal });
 
   let text = "";

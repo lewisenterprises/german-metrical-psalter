@@ -24,8 +24,9 @@ function json(status: number, body: object): Response {
 }
 
 // Starts a decoupled generation job and returns its id immediately. The actual
-// generation runs in `after()` — independent of this (or any) client connection
-// — and writes progress to Redis. The client streams/polls the job by id.
+// generation runs in the Trigger.dev task `generate-psalm` — independent of this
+// (or any) client connection — and writes progress to Redis. The client
+// streams/polls the job by id.
 export async function POST(req: NextRequest) {
   let body: {
     psalm?: number;

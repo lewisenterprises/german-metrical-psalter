@@ -76,13 +76,14 @@ src/trigger/generate.ts        (Trigger.dev task: calls `runJob` in src/lib/jobs
 
 ### Provider abstraction (`src/lib/providers.ts`)
 
-The core. Seven providers behind three implementations, all reporting visible reasoning text through `onReasoning(delta, count)` alongside `onChunk(delta)` for content:
+The core. Seven providers behind four implementations, all reporting visible reasoning text through `onReasoning(delta, count)` alongside `onChunk(delta)` for content:
 
 | Provider | Path | Notes |
 |---|---|---|
 | `anthropic` | `generateAnthropic` | Anthropic SDK (streaming), prompt caching on system, `output_config.format` json_schema, **summarized thinking** streamed as reasoning |
 | `openai` | `generateOpenAIResponses` | OpenAI SDK, **Responses API**, json_schema strict, `store: false`, reasoning summaries streamed as reasoning |
-| `google` / `xai` | `generateOpenAICompat` | OpenAI SDK Chat Completions with per-provider `baseURL`, json_schema strict |
+| `google` | `generateGeminiNative` | `fetch` to the native `streamGenerateContent?alt=sse` (not the OpenAI-compat endpoint), `responseJsonSchema`, **thought summaries** (`part.thought`) streamed as reasoning |
+| `xai` | `generateOpenAICompat` | OpenAI SDK Chat Completions with per-provider `baseURL`, json_schema strict |
 | `deepseek` / `openrouter` / `lmstudio` | `generateOpenAICompat` | Same, **json_object** mode (no schema enforcement) |
 
 Per-provider quirks already baked in — don't undo without good reason:
@@ -91,7 +92,7 @@ Per-provider quirks already baked in — don't undo without good reason:
 - **OpenAI runs on the Responses API**, not Chat Completions, because only Responses streams reasoning summaries. Reasoning models (`o*`, `gpt-5*`, minus `-chat`/`chatgpt-`) get `reasoning: { effort: "low", summary: "auto" }` (no effort on `-pro`); non-reasoning models like `gpt-4.1` get no `reasoning` param. If a 400 refuses summaries (unverified org) or the reasoning params, it steps down once each rather than failing. `-pro` models are still filtered out of discovery on cost grounds.
 - **`stream_options.include_usage` is skipped for DeepSeek and LM Studio.** Their compat layers silently break streaming when they don't recognise it.
 - **DeepSeek emits `delta.reasoning_content` during the thinking phase** (OpenRouter normalises it to `delta.reasoning`), then switches to `delta.content`. Both are treated as reasoning text, so the UI shows the thinking rather than looking frozen.
-- **Google gets `reasoning_effort: "low"`** — Gemini 3.x otherwise thinks for 90s+ before its first token.
+- **Gemini runs on the native API, not the OpenAI-compat endpoint**, because only the native API returns thought summaries as separate parts (`thought: true`); the compat endpoint documents no separate thought field and appears to fold thoughts into the message content, which would break the JSON. It sends `thinkingConfig: { includeThoughts: true }` plus a low cap — `thinkingLevel: "LOW"` on Gemini 3.x, `thinkingBudget: 1024` on 2.x (thinkingLevel is an error there) — because Gemini 3.x otherwise thinks for 90s+ before its first token. If a 400 refuses the thinking config before any output, it steps down once each: first to `includeThoughts` alone, then to no thinking config. No `maxOutputTokens` is set (it counts thinking too); the model's own limit applies, as it did on the compat endpoint. `usage.output_tokens` includes thought tokens, which are also reported as `reasoning_tokens`.
 - **LM Studio uses a dummy `apiKey: "lm-studio"`** (the SDK requires non-empty) and discovers loaded models at runtime via `GET /v1/models`, filtering out embedding/whisper/TTS models that can't do chat completions.
 - **Provider availability** is determined by env-key presence (see `ENV_KEYS` in `src/lib/discovery.ts`). LM Studio is "available" iff the local server responds.
 
@@ -129,17 +130,19 @@ If output quality regresses, the prompt is the lever — schema and provider plu
 
 ### i18n (`src/lib/i18n.ts`)
 
-EN/DE strings as a `STRINGS` object. Function-valued entries take parameters (verse counts, elapsed seconds). Choice persists in `localStorage` under `psalter.lang`. Hebrew block is always Hebrew; model labels and provider names are always English (proper nouns).
+EN/DE strings as a `STRINGS` object. Function-valued entries take parameters (verse counts, elapsed seconds). The choice is the `lang` field of the settings object (`src/lib/prefs.ts`), stored in `sessionStorage` under `psalter.prefs` and seeded from saved defaults under the same key in `localStorage`. Hebrew block is always Hebrew; model labels and provider names are always English (proper nouns).
 
 ### Icon and OG image
 
-Both are rendered via `next/og` `ImageResponse` at request time:
+Both are rendered via `next/og` `ImageResponse` and prerendered as static images at build time (the build lists them as `○` static routes):
 - `src/app/icon.tsx` — 64×64 PNG, served at `/icon`, used as favicon
 - `src/app/opengraph-image.tsx` — 1200×630 PNG, served at `/opengraph-image`
 
-Both fetch `Noto Serif Hebrew` from `cdn.jsdelivr.net/fontsource/fonts/noto-serif-hebrew@latest/hebrew-500-normal.ttf` at render time. The font is a **static** TTF — Satori cannot consume variable fonts, so do not switch the URL to the Google Fonts variable file.
+Both fetch `Noto Serif Hebrew` from `cdn.jsdelivr.net/fontsource/fonts/noto-serif-hebrew@latest/hebrew-500-normal.ttf` when rendered, so the build needs network access to jsDelivr. The font is a **static** TTF — Satori cannot consume variable fonts, so do not switch the URL to the Google Fonts variable file.
 
 ## Environment variables
+
+Also listed, with empty values, in `.env.local.example` (copy it to `.env.local` for local dev).
 
 ```
 ANTHROPIC_API_KEY     # Anthropic
