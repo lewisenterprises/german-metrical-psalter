@@ -19,14 +19,16 @@ sandbox starts without `node_modules`. When a change is ready:
    the build is the gate.
 2. Commit to `master` and push. That one push deploys everything: Vercel's
    GitHub integration deploys the web app, and Trigger.dev's GitHub integration
-   deploys the generation task in `src/trigger/`. Nothing else is needed, and
-   you hold no Vercel or Trigger.dev credentials.
+   deploys the generation task in `src/trigger/`. Nothing else is needed (no
+   manual `npm run trigger:deploy`), and you hold no Vercel or Trigger.dev
+   credentials. Vercel deploys Claude-authored commits like any other.
 3. Confirm both deploys happened before you say a change is live. Check the
-   pushed commit with `gh api repos/{owner}/{repo}/commits/<sha>/status` and
-   `.../commits/<sha>/check-runs`. Vercel can refuse a deploy because of who
-   authored the commit, and your commits come from Claude's GitHub App, not
-   from Alun. If a deploy is missing or failed, say so and don't report the
-   change as live.
+   pushed commit with `gh api repos/{owner}/{repo}/commits/<sha>/status` (the
+   Vercel status) and `.../commits/<sha>/check-runs` (the Trigger.dev check run,
+   named `Trigger.dev deployment (…:prod)`). Without `gh`, `curl` the same paths
+   under `https://api.github.com/` — the repo is readable without a token.
+   Both take a few minutes. If a deploy is missing or failed, say so and don't
+   report the change as live.
 
 **Why both matter.** The system and user prompts are built on the Vercel side
 and passed into the task, so prompt *text* and UI changes are live once Vercel
@@ -49,42 +51,53 @@ and tell them which psalm, model and settings to try.
 
 There is no test runner.
 
-## Deployment constraint (Vercel)
+## Deployment (Vercel + Trigger.dev)
 
-`src/app/api/generate/route.ts` declares `maxDuration = 800`. This requires **Fluid Compute** enabled on the Vercel project — otherwise deploy fails. Classic serverless on Pro caps at 300s; Fluid Compute extends to 800s. The site lives at `https://german-metrical-psalter.vercel.app`. `metadataBase` in `src/app/layout.tsx` defaults there; override via `NEXT_PUBLIC_SITE_URL`.
+Two deploy targets, both fed by a push to `master` (see "Working from Slack"):
+
+- **Vercel** serves the UI and the API routes. None of them runs a model: `/api/generate` only enqueues, and the longest-lived route is the live tail `/api/job/[id]/stream` at `maxDuration = 300` (the classic-serverless ceiling, so Fluid Compute is not required). The site lives at `https://german-metrical-psalter.vercel.app`. `metadataBase` in `src/app/layout.tsx` defaults there; override via `NEXT_PUBLIC_SITE_URL`.
+- **Trigger.dev** (project `proj_jokoakevjzwxelcmplsb`, `trigger.config.ts`, tasks in `src/trigger/`, runtime `node-22`) runs the generation task `generate-psalm` off-Vercel with `maxDuration: 3600` and retries off, so long reasoning renders aren't bound by a serverless timeout. `npm run trigger:dev` runs the task locally; `npm run trigger:deploy` exists but isn't needed, since the GitHub integration deploys prod on every push to `master`.
+- **Upstash Redis** is the only channel between them: the task writes job state there, and the Vercel routes read it.
 
 ## Architecture
 
-**Single-page UI + three API routes.** `src/app/page.tsx` is a client component handling all interaction. The three routes are independent and stateless.
+**Single-page UI + API routes around a job store.** `src/app/page.tsx` renders `src/app/Psalter.tsx`, the client component handling all interaction.
 
 ```
-src/app/page.tsx          (UI: psalm grid, variants slider, provider chips, EN/DE toggle, SSE reader)
-src/app/api/psalm/[n]     (GET: bundled Hebrew lookup)
-src/app/api/models        (GET: discovered + curated models, per-model availability, LM Studio discovery)
-src/app/api/generate      (POST: SSE stream of generation events)
+src/app/Psalter.tsx            (UI: psalm grid, variants slider, provider chips, EN/DE toggle, job stream reader)
+src/app/api/psalm/[n]          (GET: bundled Hebrew lookup)
+src/app/api/models             (GET: discovered + curated models, per-model availability, LM Studio discovery)
+src/app/api/generate           (POST: builds the prompts, seeds the job in Redis, triggers `generate-psalm`, returns 202 { jobId })
+src/app/api/job/[id]           (GET: current job snapshot — the poll endpoint; `?reasoning=0` omits the reasoning text)
+src/app/api/job/[id]/stream    (GET: SSE live tail of the job snapshot)
+src/app/api/job/[id]/cancel    (POST: cancels the Trigger.dev run, marks the job cancelled)
+src/trigger/generate.ts        (Trigger.dev task: calls `runJob` in src/lib/jobs.ts)
 ```
 
 ### Provider abstraction (`src/lib/providers.ts`)
 
-The core. Seven providers behind two implementations:
+The core. Seven providers behind three implementations, all reporting visible reasoning text through `onReasoning(delta, count)` alongside `onChunk(delta)` for content:
 
 | Provider | Path | Notes |
 |---|---|---|
-| `anthropic` | `generateAnthropic` | Anthropic SDK, prompt caching on system, json_schema strict, thinking **disabled** |
-| `openai` / `google` / `xai` | `generateOpenAICompat` | OpenAI SDK with per-provider `baseURL`, json_schema strict |
-| `deepseek` / `openrouter` / `lmstudio` | `generateOpenAICompat` | Same SDK, **json_object** mode (no schema enforcement) |
+| `anthropic` | `generateAnthropic` | Anthropic SDK (streaming), prompt caching on system, `output_config.format` json_schema, **summarized thinking** streamed as reasoning |
+| `openai` | `generateOpenAIResponses` | OpenAI SDK, **Responses API**, json_schema strict, `store: false`, reasoning summaries streamed as reasoning |
+| `google` / `xai` | `generateOpenAICompat` | OpenAI SDK Chat Completions with per-provider `baseURL`, json_schema strict |
+| `deepseek` / `openrouter` / `lmstudio` | `generateOpenAICompat` | Same, **json_object** mode (no schema enforcement) |
 
 Per-provider quirks already baked in — don't undo without good reason:
 
-- **Anthropic adaptive thinking is disabled** (`thinking: { type: "disabled" }`). Earlier testing showed it hung the route. The user explicitly asked for the toggle to be removed; do not re-add it without asking.
+- **Anthropic thinking is on** (it was `disabled` until 2026-09-25). Models from 4.6 on get `thinking: { type: "adaptive", display: "summarized" }` plus `output_config.effort: "medium"` (`display` must be explicit: current models default to `"omitted"`, which streams empty thinking). Pre-4.6 models — `CLAUDE_BUDGET_THINKING`, e.g. `claude-haiku-4-5` — get `thinking: { type: "enabled", budget_tokens: 2048 }` and no effort. The choice is guessed from the id; if the API 400s on the thinking params before any output, it retries once with the other form. `max_tokens` is 32000 to leave room for thinking. Because thinking is no longer disabled, discovery no longer hides Fable, Mythos or Opus 5.5.
+- **OpenAI runs on the Responses API**, not Chat Completions, because only Responses streams reasoning summaries. Reasoning models (`o*`, `gpt-5*`, minus `-chat`/`chatgpt-`) get `reasoning: { effort: "low", summary: "auto" }` (no effort on `-pro`); non-reasoning models like `gpt-4.1` get no `reasoning` param. If a 400 refuses summaries (unverified org) or the reasoning params, it steps down once each rather than failing. `-pro` models are still filtered out of discovery on cost grounds.
 - **`stream_options.include_usage` is skipped for DeepSeek and LM Studio.** Their compat layers silently break streaming when they don't recognise it.
-- **DeepSeek emits `delta.reasoning_content` during the thinking phase**, then switches to `delta.content`. The streaming loop counts both and emits `thinking` events to the client during reasoning so the UI doesn't look frozen.
+- **DeepSeek emits `delta.reasoning_content` during the thinking phase** (OpenRouter normalises it to `delta.reasoning`), then switches to `delta.content`. Both are treated as reasoning text, so the UI shows the thinking rather than looking frozen.
+- **Google gets `reasoning_effort: "low"`** — Gemini 3.x otherwise thinks for 90s+ before its first token.
 - **LM Studio uses a dummy `apiKey: "lm-studio"`** (the SDK requires non-empty) and discovers loaded models at runtime via `GET /v1/models`, filtering out embedding/whisper/TTS models that can't do chat completions.
 - **Provider availability** is determined by env-key presence (see `ENV_KEYS` in `src/lib/discovery.ts`). LM Studio is "available" iff the local server responds.
 
 ### Models registry
 
-Cloud models are discovered live by `src/lib/discovery.ts` (server-only; the Trigger.dev task gets a resolved `ModelConfig` in its payload and never imports it). For each provider whose env key is set, `listCloudModels()` queries its models endpoint in parallel (5s timeout each) — Anthropic `/v1/models`, OpenAI `/v1/models`, Google's native `v1beta/models`, xAI `/v1/language-models` (falling back to `/v1/models`), DeepSeek `/models` — and filters to text chat models this app can drive: no image/video/audio/TTS/transcription/realtime/embedding/moderation/search/computer-use/codex models, no dated snapshots whose undated alias is known, no OpenAI `-pro` (Responses-API only) or legacy models without json_schema, no Claude models that report no structured-output support or can't take `thinking: disabled`. Results are cached in module memory for an hour (five minutes after a failure).
+Cloud models are discovered live by `src/lib/discovery.ts` (server-only; the Trigger.dev task gets a resolved `ModelConfig` in its payload and never imports it). For each provider whose env key is set, `listCloudModels()` queries its models endpoint in parallel (5s timeout each) — Anthropic `/v1/models`, OpenAI `/v1/models`, Google's native `v1beta/models`, xAI `/v1/language-models` (falling back to `/v1/models`), DeepSeek `/models` — and filters to text chat models this app can drive: no image/video/audio/TTS/transcription/realtime/embedding/moderation/search/computer-use/codex models, no dated snapshots whose undated alias is known, no OpenAI `-pro` (kept out on cost and latency) or legacy models without json_schema, no Claude models that report no structured-output support. Results are cached in module memory for an hour (five minutes after a failure).
 
 Discovered models are listed **newest first** within each provider: by creation date where the API gives one (Anthropic `created_at`, OpenAI and xAI `created`, DeepSeek `created` if present; a dated snapshot lends its date to the alias it folds into), and otherwise — Google's API has no dates — by the version in the id, highest first (`gemini-3.8` > `3.7` > `3.1` > `2.5`), then pro/flash/flash-lite, GA before preview. Dated models sort ahead of undated ones in the same provider. The order depends only on which models are listed, never on the API's response order.
 
@@ -92,18 +105,17 @@ Discovered models are listed **newest first** within each provider: by creation 
 
 LM Studio models are discovered by `discoverLMStudioModels()` and merged in by `/api/models`. The generate route resolves an id via `findModel` (curated), then the discovered list (cached), then LM Studio, so any listed or loaded model is callable without registry edits. The UI falls back to `DEFAULT_MODEL`, else the first available model, when a saved choice is no longer in the list.
 
-### SSE protocol (`/api/generate`)
+### Job flow (`src/lib/jobs.ts`, `/api/generate`, `/api/job/[id]*`)
 
-The route returns `text/event-stream`. Each event is `data: <json>\n\n`. Event types:
+Generation is a decoupled job, not a request-scoped stream:
 
-- `start` — `{ model, provider }`
-- `chunk` — `{ delta: string }` — content tokens as they arrive
-- `thinking` — `{ count }` — reasoning chunk count (throttled every 10), only for models that emit `reasoning_content`
-- `heartbeat` — every 10s, keeps the connection alive while a reasoning model is silent
-- `done` — final payload: `{ variants, meta: { stop_reason, usage, provider, elapsed_ms } }`
-- `error` — `{ message, status? }`
+1. **`POST /api/generate`** validates the body, resolves the model, builds the system and user prompts (so prompt text is a Vercel-side change), writes a `running` `JobState` to Redis under `psalter:job:<id>` (TTL 1h), triggers `generate-psalm` with `{ id, model, systemPrompt, userPrompt, createdAt }`, stores the Trigger run id under `psalter:job:<id>:run`, and returns `202 { jobId }`. It returns 503 if Upstash isn't configured.
+2. **The task** calls `runJob`, which runs `generateVariants` and rewrites the whole `JobState` at most every 500ms when something changed: `text` (content so far), `reasoning` (reasoning-delta count), `reasoningText` (the visible reasoning, tail-capped at `REASONING_TEXT_CAP` = 24,000 chars, trimmed only once it overshoots by 4,000) and `reasoningDropped` (chars cut from its front). The terminal write is `done` with `result: { variants, meta: { stop_reason, usage, provider, elapsed_ms } }`, or `error` with `error`/`errorStatus`. `runJob` never throws, so the task always completes.
+3. **`GET /api/job/[id]/stream`** tails Redis every 400ms and sends `data: <json>\n\n` snapshots when `text` length, `reasoning` or `status` changes — `{ status, text, reasoning, reasoningText?, reasoningDropped?, createdAt, result, error }`, with `reasoningText` resent only when it grew — plus a `: ping` comment after 10s of silence. It closes on a terminal status (`done`/`error`/`cancelled`, or `missing` if the job is gone) or at 300s.
+4. **The client** (`consumeJob` in `Psalter.tsx`) reads the stream first and falls back to polling `GET /api/job/[id]` every 1.5s if it drops. The job id and its reference are kept in `sessionStorage`, so a reload resumes the job. The metre sweep follows its dozen jobs by polling `?reasoning=0` every 2s instead.
+5. **Cancel** posts to `/api/job/[id]/cancel`, which cancels the Trigger run and then flips the job to `cancelled`.
 
-The client reader in `page.tsx` accumulates `chunk.delta` into `streamingText` (shown in a "raw stream" disclosure while generating), tracks `thinking.count` for the live "Thinking… N reasoning chunks" message, and renders structured variants on `done`.
+While generating, the status line reads "Thinking… N reasoning chunks" until content arrives, then "Receiving… N chars". Two disclosures sit under it (single jobs only, not sweeps, and only while generating): **"Show reasoning"** (DE "Überlegungen anzeigen") with the reasoning text, auto-scrolled while the reader is at the bottom and prefixed "… N earlier characters not shown" once the cap trims it; and **"Show raw stream"** with the content so far. Structured variants render on `done`.
 
 ### Prompt (`src/lib/prompt.ts`)
 
@@ -138,9 +150,12 @@ DEEPSEEK_API_KEY      # DeepSeek
 OPENROUTER_API_KEY    # open-source models via OpenRouter
 LMSTUDIO_BASE_URL     # optional, defaults to http://localhost:1234/v1
 NEXT_PUBLIC_SITE_URL  # optional, defaults to https://german-metrical-psalter.vercel.app
+UPSTASH_REDIS_REST_URL    # job store — required on Vercel and Trigger.dev
+UPSTASH_REDIS_REST_TOKEN
+TRIGGER_SECRET_KEY    # on Vercel, so /api/generate and cancel can reach Trigger.dev
 ```
 
-Missing keys are not an error — corresponding chips are marked `available: false` and rendered greyed-out with a tooltip explaining the missing key.
+Provider keys are needed in both places: Vercel uses them for discovery and availability, and the Trigger.dev task makes the actual calls. Missing keys are not an error — corresponding chips are marked `available: false` and rendered greyed-out with a tooltip explaining the missing key.
 
 ## When adding a provider or model
 
