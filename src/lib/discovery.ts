@@ -202,7 +202,9 @@ export function mergeProvider(provider: Discoverable, listed: Listed[]): ModelCo
   }));
 
   const known = new Set([...entries.map((e) => e.id), ...curatedIds]);
+  // Order-independent: an alias listed after its snapshot must still count.
   const present = new Set<string>();
+  const seen = new Set<string>();
   const extras: Listed[] = [];
   for (const e of entries) {
     const base = snapshotBases(provider, e.id).find((b) => known.has(b));
@@ -210,8 +212,9 @@ export function mergeProvider(provider: Discoverable, listed: Listed[]): ModelCo
       present.add(base);
       continue;
     }
-    if (present.has(e.id)) continue;
     present.add(e.id);
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
     if (!curatedIds.has(e.id)) extras.push(e);
   }
 
