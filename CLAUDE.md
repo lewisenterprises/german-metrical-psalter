@@ -17,28 +17,29 @@ sandbox starts without `node_modules`. When a change is ready:
 
 1. `npm run lint` and `npm run build` must pass. There is no test runner, so
    the build is the gate.
-2. Commit to `master` and push. Vercel's GitHub integration deploys production
-   from the push, and nothing else is needed.
-3. Confirm the deploy happened before you say it is live. Check the `Vercel`
-   status on the pushed commit with
-   `gh api repos/{owner}/{repo}/commits/<sha>/status`. Vercel can refuse a
-   deploy because of who authored the commit, and your commits come from
-   Claude's GitHub App, not from Alun. If no `Vercel` status appears, say so
-   and don't report the change as live.
+2. Commit to `master` and push. That one push deploys everything: Vercel's
+   GitHub integration deploys the web app, and Trigger.dev's GitHub integration
+   deploys the generation task in `src/trigger/`. Nothing else is needed, and
+   you hold no Vercel or Trigger.dev credentials.
+3. Confirm both deploys happened before you say a change is live. Check the
+   pushed commit with `gh api repos/{owner}/{repo}/commits/<sha>/status` and
+   `.../commits/<sha>/check-runs`. Vercel can refuse a deploy because of who
+   authored the commit, and your commits come from Claude's GitHub App, not
+   from Alun. If a deploy is missing or failed, say so and don't report the
+   change as live.
 
-**What deploys where.** The web app deploys to Vercel. The generation task in
-`src/trigger/` runs on Trigger.dev and deploys separately, with
-`npm run trigger:deploy`. The system and user prompts are built on the Vercel
-side and passed into the task, so a change to the prompt *text* or the UI only
-needs the push. A change to anything the task bundles — `src/trigger/`,
-`src/lib/jobs.ts`, `src/lib/providers.ts`, `OUTPUT_SCHEMA` in
-`src/lib/prompt.ts` — also needs a Trigger.dev deploy. Say so and hand Alun the
-command, unless the channel has been given a Trigger.dev credential.
+**Why both matter.** The system and user prompts are built on the Vercel side
+and passed into the task, so prompt *text* and UI changes are live once Vercel
+finishes. Anything the task bundles — `src/trigger/`, `src/lib/jobs.ts`,
+`src/lib/providers.ts`, `OUTPUT_SCHEMA` in `src/lib/prompt.ts` — is only live
+once the Trigger.dev deploy finishes too.
 
 **Money.** Every generation is a paid call to a model provider on Alun's keys.
 The sandbox holds no provider keys, and it should stay that way. When you need
 to see output, ask whoever asked for the change to generate it on the live site,
 and tell them which psalm, model and settings to try.
+
+## Commands
 
 - `npm run dev` — dev server (Turbopack on port 3000)
 - `npm run build` — production build
