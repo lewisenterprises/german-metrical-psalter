@@ -282,13 +282,21 @@ async function getJSON<T>(
   return (await r.json()) as T;
 }
 
-type Lister = (key: string, signal: AbortSignal) => Promise<Listed[]>;
+// raw/pages feed the non-secret diagnostics in /api/models.
+interface ListResult {
+  listed: Listed[];
+  raw: number;
+  pages: number;
+}
+type Lister = (key: string, signal: AbortSignal) => Promise<ListResult>;
 
 const LISTERS: Record<Discoverable, Lister> = {
   async anthropic(key, signal) {
     const all: AnthropicModel[] = [];
     let after: string | undefined;
-    for (let page = 0; page < 10; page++) {
+    let pages = 0;
+    for (; pages < 10; ) {
+      pages++;
       const url = new URL("https://api.anthropic.com/v1/models");
       url.searchParams.set("limit", "1000");
       if (after) url.searchParams.set("after_id", after);
@@ -301,16 +309,31 @@ const LISTERS: Record<Discoverable, Lister> = {
       if (!body.has_more || !body.last_id) break;
       after = body.last_id;
     }
-    return filterAnthropic(all);
+    return { listed: filterAnthropic(all), raw: all.length, pages };
   },
 
   async openai(key, signal) {
-    const body = await getJSON<{ data?: OpenAIStyleModel[] }>(
-      "https://api.openai.com/v1/models",
-      { Authorization: `Bearer ${key}` },
-      signal
-    );
-    return filterOpenAI(body.data ?? []);
+    // /v1/models has been a single page, but follow cursor pagination if the
+    // response ever carries it.
+    const all: OpenAIStyleModel[] = [];
+    let after: string | undefined;
+    let pages = 0;
+    for (; pages < 10; ) {
+      pages++;
+      const url = new URL("https://api.openai.com/v1/models");
+      if (after) url.searchParams.set("after", after);
+      const body = await getJSON<{
+        data?: OpenAIStyleModel[];
+        has_more?: boolean;
+        last_id?: string | null;
+      }>(url.toString(), { Authorization: `Bearer ${key}` }, signal);
+      const data = body.data ?? [];
+      all.push(...data);
+      const last = body.last_id ?? data.at(-1)?.id;
+      if (!body.has_more || !last) break;
+      after = last;
+    }
+    return { listed: filterOpenAI(all), raw: all.length, pages };
   },
 
   async google(key, signal) {
@@ -318,7 +341,9 @@ const LISTERS: Record<Discoverable, Lister> = {
     // a header rather than ?key= so it stays out of URLs.
     const all: GoogleModel[] = [];
     let token: string | undefined;
-    for (let page = 0; page < 10; page++) {
+    let pages = 0;
+    for (; pages < 10; ) {
+      pages++;
       const url = new URL("https://generativelanguage.googleapis.com/v1beta/models");
       url.searchParams.set("pageSize", "1000");
       if (token) url.searchParams.set("pageToken", token);
@@ -331,7 +356,7 @@ const LISTERS: Record<Discoverable, Lister> = {
       if (!body.nextPageToken) break;
       token = body.nextPageToken;
     }
-    return filterGoogle(all);
+    return { listed: filterGoogle(all), raw: all.length, pages };
   },
 
   async xai(key, signal) {
@@ -342,7 +367,8 @@ const LISTERS: Record<Discoverable, Lister> = {
         headers,
         signal
       );
-      return filterXAI(body.models ?? []);
+      const all = body.models ?? [];
+      return { listed: filterXAI(all), raw: all.length, pages: 1 };
     } catch (err) {
       if (signal.aborted) throw err;
       const body = await getJSON<{ data?: OpenAIStyleModel[] }>(
@@ -350,7 +376,8 @@ const LISTERS: Record<Discoverable, Lister> = {
         headers,
         signal
       );
-      return filterXAIByName(body.data ?? []);
+      const all = body.data ?? [];
+      return { listed: filterXAIByName(all), raw: all.length, pages: 1 };
     }
   },
 
@@ -360,16 +387,27 @@ const LISTERS: Record<Discoverable, Lister> = {
       { Authorization: `Bearer ${key}` },
       signal
     );
-    return filterDeepSeek(body.data ?? []);
+    const all = body.data ?? [];
+    return { listed: filterDeepSeek(all), raw: all.length, pages: 1 };
   },
 };
 
 const curatedFor = (p: CloudProvider) => MODELS.filter((m) => m.provider === p);
 
+export interface Diagnostics {
+  fetchedAt: string;
+  raw?: number;
+  pages?: number;
+  kept?: number;
+  merged?: number;
+  fallback?: string;
+}
+
 interface CacheEntry {
   at: number;
   ttl: number;
   models: Promise<ModelConfig[]>;
+  diag?: Diagnostics;
 }
 // Module memory: lives as long as the server instance. Holding the promise
 // also dedupes concurrent requests while a query is in flight.
@@ -380,14 +418,21 @@ function discover(p: Discoverable, key: string): Promise<ModelConfig[]> {
   if (hit && Date.now() - hit.at < hit.ttl) return hit.models;
   const entry: CacheEntry = { at: Date.now(), ttl: TTL_MS, models: Promise.resolve([]) };
   entry.models = LISTERS[p](key, AbortSignal.timeout(TIMEOUT_MS))
-    .then((listed) => {
+    .then(({ listed, raw, pages }) => {
+      const fetchedAt = new Date().toISOString();
+      entry.diag = { fetchedAt, raw, pages, kept: listed.length };
       if (listed.length === 0) throw new Error("no relevant models after filtering");
-      return mergeProvider(p, listed);
+      const merged = mergeProvider(p, listed);
+      entry.diag.merged = merged.length;
+      return merged;
     })
     .catch((err) => {
-      console.warn(
-        `[discovery] ${p}: ${err instanceof Error ? err.message : String(err)} — using curated list`
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[discovery] ${p}: ${message} — using curated list`);
+      entry.diag = {
+        ...(entry.diag ?? { fetchedAt: new Date().toISOString() }),
+        fallback: message,
+      };
       entry.ttl = FAILURE_TTL_MS;
       return curatedFor(p);
     });
@@ -407,4 +452,12 @@ export async function listCloudModels(): Promise<AvailableModel[]> {
     })
   );
   return groups.flat();
+}
+
+// Per-provider counts from this instance's cache (no ids or keys), for
+// checking the filters against what the APIs actually return.
+export function discoveryDiagnostics(): Partial<Record<Discoverable, Diagnostics>> {
+  const out: Partial<Record<Discoverable, Diagnostics>> = {};
+  for (const [p, entry] of cache) if (entry.diag) out[p] = entry.diag;
+  return out;
 }
