@@ -32,6 +32,7 @@ const FAILURE_TTL_MS = 5 * 60 * 1000;
 export interface Listed {
   id: string;
   label?: string;
+  // Unix seconds, where the provider reports a release/creation date.
   created?: number;
   aliases?: string[];
 }
@@ -43,6 +44,7 @@ export type AvailableModel = ModelConfig & { available: boolean };
 export interface AnthropicModel {
   id: string;
   display_name?: string;
+  created_at?: string;
   capabilities?: { structured_outputs?: { supported?: boolean } };
 }
 
@@ -61,6 +63,7 @@ export function filterAnthropic(data: AnthropicModel[]): Listed[] {
     .map((m) => ({
       id: m.id,
       label: m.display_name?.replace(/^Claude\s+/, "") || undefined,
+      created: m.created_at ? Date.parse(m.created_at) / 1000 || undefined : undefined,
     }));
 }
 
@@ -147,7 +150,7 @@ export function filterXAIByName(data: OpenAIStyleModel[]): Listed[] {
 export function filterDeepSeek(data: OpenAIStyleModel[]): Listed[] {
   return data
     .filter((m) => m.id.startsWith("deepseek-") && !/embed/.test(m.id))
-    .map((m) => ({ id: m.id }));
+    .map((m) => ({ id: m.id, created: m.created }));
 }
 
 // ---- Merge ----------------------------------------------------------------
@@ -184,9 +187,9 @@ function snapshotBases(provider: Discoverable, id: string): string[] {
   return bases;
 }
 
-// Curated entries the provider still lists keep their label and position (the
-// small-to-large convention); newly discovered models follow them. Curated
-// entries the provider no longer lists are dropped.
+// Discovered models are listed newest first. Curated entries the provider
+// still lists keep their label; curated entries it no longer lists are
+// dropped. The result depends only on the set listed, not the API's order.
 export function mergeProvider(provider: Discoverable, listed: Listed[]): ModelConfig[] {
   const curated = MODELS.filter((m) => m.provider === provider);
   const curatedIds = new Set(curated.map((m) => m.id));
@@ -201,36 +204,66 @@ export function mergeProvider(provider: Discoverable, listed: Listed[]): ModelCo
       l.id,
   }));
 
+  // One row per surviving id. A snapshot folds into its alias and lends it its
+  // date (the newest, if several) when the alias carries none.
   const known = new Set([...entries.map((e) => e.id), ...curatedIds]);
-  // Order-independent: an alias listed after its snapshot must still count.
-  const present = new Set<string>();
-  const seen = new Set<string>();
-  const extras: Listed[] = [];
+  const rows = new Map<string, { label?: string; created?: number; snapshot?: number }>();
   for (const e of entries) {
     const base = snapshotBases(provider, e.id).find((b) => known.has(b));
+    const row = rows.get(base ?? e.id) ?? {};
     if (base) {
-      present.add(base);
-      continue;
+      if (e.created !== undefined) row.snapshot = Math.max(row.snapshot ?? 0, e.created);
+    } else {
+      row.label ??= e.label;
+      if (e.created !== undefined) row.created = Math.max(row.created ?? 0, e.created);
     }
-    present.add(e.id);
-    if (seen.has(e.id)) continue;
-    seen.add(e.id);
-    if (!curatedIds.has(e.id)) extras.push(e);
+    rows.set(base ?? e.id, row);
   }
 
-  // Newest first where the API gives creation times; otherwise API order.
-  if (extras.every((e) => typeof e.created === "number")) {
-    extras.sort((a, b) => (b.created ?? 0) - (a.created ?? 0));
-  }
-
-  return [
-    ...curated.filter((m) => present.has(m.id)),
-    ...extras.map((e) => ({
-      id: e.id,
-      label: e.label ?? humanise(provider, e.id),
+  const curatedLabel = new Map(curated.map((m) => [m.id, m.label]));
+  return [...rows.entries()]
+    .map(([id, r]) => ({ id, created: r.created ?? r.snapshot, label: r.label }))
+    .sort(newestFirst)
+    .map((r) => ({
+      id: r.id,
+      label: curatedLabel.get(r.id) ?? r.label ?? humanise(provider, r.id),
       provider,
-    })),
-  ];
+    }));
+}
+
+// Dated models first, by creation date; then undated ones (Google's API gives
+// no dates) by the version in the id, highest first (gemini-3.8 > 3.7 > 2.5),
+// then tier (pro, flash, flash-lite, other), GA before preview, then id.
+function newestFirst(
+  a: { id: string; created?: number },
+  b: { id: string; created?: number }
+): number {
+  if (a.created !== undefined && b.created !== undefined && a.created !== b.created) {
+    return b.created - a.created;
+  }
+  if ((a.created === undefined) !== (b.created === undefined)) {
+    return a.created === undefined ? 1 : -1;
+  }
+  const va = versionOf(a.id);
+  const vb = versionOf(b.id);
+  for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+    const d = (vb[i] ?? -1) - (va[i] ?? -1);
+    if (d) return d;
+  }
+  const tier = (id: string) =>
+    /-pro\b/.test(id) ? 0 : /-flash-lite\b/.test(id) ? 2 : /-flash\b/.test(id) ? 1 : 3;
+  const preview = (id: string) => (/preview/.test(id) ? 1 : 0);
+  return (
+    tier(a.id) - tier(b.id) ||
+    preview(a.id) - preview(b.id) ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
+}
+
+// "gemini-3.1-pro-preview" → [3, 1]; "deepseek-v4-pro" → [4]; none → [].
+function versionOf(id: string): number[] {
+  const m = id.match(/(?:^|-)v?(\d+(?:\.\d+)*)(?=-|$)/);
+  return m ? m[1].split(".").map(Number) : [];
 }
 
 // Labels for id-only listings, matching the curated style: the provider name
