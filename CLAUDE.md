@@ -8,7 +8,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Generates singable German Common Metre (8.6.8.6, iambic) renderings of the Hebrew Psalms by routing the same prompt to a user-chosen LLM. The Hebrew source is bundled; the rendering is generated fresh on every request.
 
-## Commands
+## Working from Slack
+
+Alun and Emmanuel Dunbar both reach you through Claude in Slack, in a cloud
+sandbox that has none of Alun's local context. They are the only people who work
+on this, so there is no preview or review step. Run `npm ci` first, since the
+sandbox starts without `node_modules`. When a change is ready:
+
+1. `npm run lint` and `npm run build` must pass. There is no test runner, so
+   the build is the gate.
+2. Commit to `master` and push. Vercel's GitHub integration deploys production
+   from the push, and nothing else is needed.
+3. Confirm the deploy happened before you say it is live. Check the `Vercel`
+   status on the pushed commit with
+   `gh api repos/{owner}/{repo}/commits/<sha>/status`. Vercel can refuse a
+   deploy because of who authored the commit, and your commits come from
+   Claude's GitHub App, not from Alun. If no `Vercel` status appears, say so
+   and don't report the change as live.
+
+**What deploys where.** The web app deploys to Vercel. The generation task in
+`src/trigger/` runs on Trigger.dev and deploys separately, with
+`npm run trigger:deploy`. The system and user prompts are built on the Vercel
+side and passed into the task, so a change to the prompt *text* or the UI only
+needs the push. A change to anything the task bundles — `src/trigger/`,
+`src/lib/jobs.ts`, `src/lib/providers.ts`, `OUTPUT_SCHEMA` in
+`src/lib/prompt.ts` — also needs a Trigger.dev deploy. Say so and hand Alun the
+command, unless the channel has been given a Trigger.dev credential.
+
+**Money.** Every generation is a paid call to a model provider on Alun's keys.
+The sandbox holds no provider keys, and it should stay that way. When you need
+to see output, ask whoever asked for the change to generate it on the live site,
+and tell them which psalm, model and settings to try.
 
 - `npm run dev` — dev server (Turbopack on port 3000)
 - `npm run build` — production build
