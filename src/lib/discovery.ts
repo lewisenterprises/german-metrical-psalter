@@ -74,7 +74,7 @@ export function filterOpenAI(data: OpenAIStyleModel[]): Listed[] {
     .filter(
       (m) =>
         /^(gpt-|o\d|chatgpt-)/.test(m.id) &&
-        !/image|audio|realtime|tts|transcribe|diarize|whisper|dall-e|embedding|moderation|search|computer-use|instruct|babbage|davinci|codex|deep-research|sora|oss/.test(
+        !/image|audio|realtime|live|tts|transcribe|diarize|whisper|dall-e|embedding|moderation|search|computer-use|instruct|babbage|davinci|codex|deep-research|sora|oss/.test(
           m.id
         ) &&
         // -pro models are Responses-API only; generation uses Chat Completions.
@@ -100,7 +100,7 @@ export function filterGoogle(models: GoogleModel[]): Listed[] {
         (m.supportedGenerationMethods ?? []).includes("generateContent") &&
         // -latest ids are moving aliases of models listed in their own right;
         // -exp ids are short-lived experiments.
-        !/image|imagen|veo|tts|audio|live|embedding|aqa|robotics|computer-use|learnlm|gemma|nano-banana|native|deep-research|-exp|-latest$/.test(
+        !/image|imagen|veo|tts|audio|live|transcribe|embedding|aqa|robotics|computer-use|customtools|learnlm|gemma|nano-banana|native|deep-research|-exp|-latest$/.test(
           m.id
         )
     )
@@ -122,14 +122,15 @@ export interface XAILanguageModel {
   output_modalities?: string[];
 }
 
-const XAI_EXCLUDE = /image|imagine|video|tts|audio|realtime|voice|embed|code/;
+const XAI_EXCLUDE = /image|imagine|video|tts|audio|realtime|voice|embed|code|multi-agent/;
 
 export function filterXAI(models: XAILanguageModel[]): Listed[] {
   return models
     .filter(
       (m) =>
         m.id.startsWith("grok-") &&
-        !XAI_EXCLUDE.test(m.id) &&
+        // Aliases too: one may become the id shown (see mergeProvider).
+        ![m.id, ...(m.aliases ?? [])].some((a) => XAI_EXCLUDE.test(a)) &&
         (m.output_modalities ?? ["text"]).includes("text") &&
         !(m.output_modalities ?? []).some((o) => o !== "text")
     )
