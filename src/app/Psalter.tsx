@@ -172,7 +172,9 @@ export function Psalter() {
     () => new Set(PROVIDER_ORDER)
   );
   const [hebrew, setHebrew] = useState<string[]>([]);
-  const [hebrewLoading, setHebrewLoading] = useState(false);
+  // Which psalm the Hebrew fetch last settled for; anything else is loading.
+  const [hebrewPsalm, setHebrewPsalm] = useState<number | null>(null);
+  const hebrewLoading = hebrewPsalm !== psalm;
   const [result, setResult] = useState<GenerateResponse | null>(null);
   const [generating, setGenerating] = useState(false);
   // True from when Cancel is pressed until the job actually reaches a terminal
@@ -217,6 +219,7 @@ export function Psalter() {
     const store = usingDefaults ? window.localStorage : window.sessionStorage;
     const prefsRaw = sessionPrefs ?? window.localStorage.getItem(PREFS_STORAGE_KEY);
     const prefs = parsePrefs(prefsRaw);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Web Storage isn't readable during SSR; applying it after mount avoids a hydration mismatch.
     setPsalm(prefs.psalm);
     setVariantCount(prefs.variants);
     setStyle(prefs.style);
@@ -415,21 +418,21 @@ export function Psalter() {
 
   // Expand the provider group holding the selected model so it's visible. Runs
   // once models have loaded and whenever the selected model changes (e.g. after
-  // session settings are restored on mount).
-  useEffect(() => {
+  // session settings are restored on mount). Adjusted during render rather than
+  // in an effect, so the expanded group shows without an extra pass.
+  const [expandedFor, setExpandedFor] = useState({ models, model });
+  if (expandedFor.models !== models || expandedFor.model !== model) {
+    setExpandedFor({ models, model });
     const selected = models.find((m) => m.id === model);
-    if (!selected) return;
-    setCollapsedProviders((prev) => {
-      if (!prev.has(selected.provider)) return prev;
-      const next = new Set(prev);
+    if (selected && collapsedProviders.has(selected.provider)) {
+      const next = new Set(collapsedProviders);
       next.delete(selected.provider);
-      return next;
-    });
-  }, [models, model]);
+      setCollapsedProviders(next);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
-    setHebrewLoading(true);
     fetch(`/api/psalm/${psalm}`)
       .then((r) => r.json())
       .then((d) => {
@@ -437,7 +440,7 @@ export function Psalter() {
         setHebrew(d.verses ?? []);
       })
       .finally(() => {
-        if (!cancelled) setHebrewLoading(false);
+        if (!cancelled) setHebrewPsalm(psalm);
       });
     return () => {
       cancelled = true;
@@ -807,6 +810,7 @@ export function Psalter() {
         id: string;
         ref: JobRef | null;
       };
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the job id lives in sessionStorage, which isn't readable during SSR, so resuming has to wait for mount.
       if (id) void consumeJob(id, ref ?? undefined, { resume: true });
     } catch {
       // Malformed entry — drop it.
