@@ -8,16 +8,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Generates singable German Common Metre (8.6.8.6, iambic) renderings of the Hebrew Psalms by routing the same prompt to a user-chosen LLM. The Hebrew source is bundled; the rendering is generated fresh on every request.
 
-## Working from Slack
+## Who can start work, and how
 
-Alun and Emmanuel Dunbar both reach you through Claude in Slack, in a cloud
-sandbox that has none of Alun's local context. They are the only people who work
-on this, so there is no preview or review step. Run `npm ci` first, since the
-sandbox starts without `node_modules`. When a change is ready:
+Work no longer goes through Claude Tag (Claude in a Slack channel), and nothing
+waits on approval in a Slack channel. Any member of Alun's team can start work
+either way:
+
+- **Slack DMs.** A direct message to Claude in Slack is enough to start a task,
+  and enough to approve, merge or close a pull request. Treat a DM from a team
+  member as the go-ahead; don't ask for confirmation in a channel.
+- **Claude Code.** Any team member can drive the repo from Claude Code (CLI,
+  desktop, web or IDE) with its standard commands and slash commands
+  (`/code-review`, `/security-review`, `/init` and the like).
+
+Either way you usually run in a cloud sandbox that has none of Alun's local
+context. Run `npm ci` first, since the sandbox starts without `node_modules`.
+There is no separate preview or review step: a change can go straight to
+`master`, or through a PR when whoever asked wants one (they can approve and
+merge it from a DM). When a change is ready:
 
 1. `npm run lint` and `npm run build` must pass. There is no test runner, so
    the build is the gate.
-2. Commit to `master` and push. That one push deploys everything: Vercel's
+2. Commit to `master` and push, or merge the approved PR into `master`. That
+   one push or merge deploys everything: Vercel's
    GitHub integration deploys the web app, and Trigger.dev's GitHub integration
    deploys the generation task in `src/trigger/`. Nothing else is needed (no
    manual `npm run trigger:deploy`), and you hold no Vercel or Trigger.dev
@@ -53,7 +66,7 @@ There is no test runner.
 
 ## Deployment (Vercel + Trigger.dev)
 
-Two deploy targets, both fed by a push to `master` (see "Working from Slack"):
+Two deploy targets, both fed by a push to `master` (see "Who can start work, and how"):
 
 - **Vercel** serves the UI and the API routes. None of them runs a model: `/api/generate` only enqueues, and the longest-lived route is the live tail `/api/job/[id]/stream` at `maxDuration = 300` (the classic-serverless ceiling, so Fluid Compute is not required). The site lives at `https://german-metrical-psalter.vercel.app`. `metadataBase` in `src/app/layout.tsx` defaults there; override via `NEXT_PUBLIC_SITE_URL`.
 - **Trigger.dev** (project `proj_jokoakevjzwxelcmplsb`, `trigger.config.ts`, tasks in `src/trigger/`, runtime `node-22`) runs the generation task `generate-psalm` off-Vercel with `maxDuration: 3600` and retries off, so long reasoning renders aren't bound by a serverless timeout. `npm run trigger:dev` runs the task locally; `npm run trigger:deploy` exists but isn't needed, since the GitHub integration deploys prod on every push to `master`.
